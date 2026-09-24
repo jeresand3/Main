@@ -1,4 +1,3 @@
-```python
 import os
 import html
 import sqlite3
