@@ -22,32 +22,15 @@ import requests
 # CONFIGURATION
 # ============================================================
 
-# These MUST be configured in Render Environment Variables.
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 
-# Example:
-# https://your-service.onrender.com
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-
-# Automatically becomes:
-# https://your-service.onrender.com/callback
 REDIRECT_URI = f"{PUBLIC_BASE_URL}/callback"
 
-# Discord category where verification channels are created.
 TICKET_CATEGORY_ID = 1552294553413746769
 
-# SQLite database location.
-#
-# Locally this uses:
-# ./verification.db
-#
-# On Render, if you configure a persistent disk and mount it at
-# /var/data, set:
-#
-# DATABASE_FILE=/var/data/verification.db
-#
 DATABASE_FILE = os.getenv(
     "DATABASE_FILE",
     "verification.db"
@@ -103,35 +86,6 @@ def validate_configuration():
 
 
 # ============================================================
-# DISCORD
-# ============================================================
-
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-
-
-class VerificationBot(commands.Bot):
-
-    async def setup_hook(self):
-        # Register persistent verification button exactly once.
-        self.add_view(VerifyView())
-
-
-bot = VerificationBot(
-    command_prefix="$",
-    intents=intents
-)
-
-
-# ============================================================
-# FASTAPI
-# ============================================================
-
-app = FastAPI()
-
-
-# ============================================================
 # DATABASE
 # ============================================================
 
@@ -141,7 +95,9 @@ def get_connection():
         timeout=30
     )
 
-    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(
+        "PRAGMA foreign_keys = ON"
+    )
 
     return conn
 
@@ -188,13 +144,6 @@ def init_database():
     finally:
         conn.close()
 
-
-init_database()
-
-
-# ============================================================
-# DATABASE HELPERS
-# ============================================================
 
 def get_verification_by_discord(discord_user_id):
     conn = get_connection()
@@ -258,13 +207,6 @@ def save_verification_and_channels(
     total_views,
     channels
 ):
-    """
-    Save the verification and every YouTube channel
-    in one database transaction.
-
-    If anything fails, nothing is partially saved.
-    """
-
     conn = get_connection()
 
     try:
@@ -328,14 +270,8 @@ def save_verification_and_channels(
 # OAUTH STATE
 # ============================================================
 
-# state -> {
-#     "discord_user_id": ...,
-#     "guild_id": ...,
-#     "created_at": ...
-# }
 oauth_states = {}
 
-# user_id -> verification channel ID
 active_verification_channels = {}
 
 
@@ -352,7 +288,10 @@ def cleanup_expired_oauth_states():
             expired.append(state)
 
     for state in expired:
-        oauth_states.pop(state, None)
+        oauth_states.pop(
+            state,
+            None
+        )
 
 
 # ============================================================
@@ -386,12 +325,7 @@ class VerifyButton(Button):
 
             return
 
-        # Clean old OAuth states.
         cleanup_expired_oauth_states()
-
-        # ----------------------------------------------------
-        # Check if Discord account already verified
-        # ----------------------------------------------------
 
         existing = get_verification_by_discord(
             user.id
@@ -405,10 +339,6 @@ class VerifyButton(Button):
             )
 
             return
-
-        # ----------------------------------------------------
-        # Check active verification channel
-        # ----------------------------------------------------
 
         existing_channel_id = (
             active_verification_channels.get(
@@ -432,15 +362,10 @@ class VerifyButton(Button):
 
                 return
 
-            # Channel no longer exists.
             active_verification_channels.pop(
                 user.id,
                 None
             )
-
-        # ----------------------------------------------------
-        # Find verification category
-        # ----------------------------------------------------
 
         category = guild.get_channel(
             TICKET_CATEGORY_ID
@@ -455,12 +380,6 @@ class VerifyButton(Button):
 
             return
 
-        # ----------------------------------------------------
-        # Create private verification channel
-        # ----------------------------------------------------
-
-        # Using the Discord ID prevents duplicate names
-        # when two users have similar usernames.
         channel_name = f"verify-{user.id}"
 
         try:
@@ -469,6 +388,7 @@ class VerifyButton(Button):
                 channel_name,
                 category=category,
                 overwrites={
+
                     guild.default_role:
                         discord.PermissionOverwrite(
                             view_channel=False
@@ -516,10 +436,6 @@ class VerifyButton(Button):
         active_verification_channels[
             user.id
         ] = channel.id
-
-        # ----------------------------------------------------
-        # Create secure OAuth state
-        # ----------------------------------------------------
 
         state = secrets.token_urlsafe(32)
 
@@ -593,8 +509,29 @@ class OAuthView(View):
 
 
 # ============================================================
-# DISCORD BOT READY
+# DISCORD BOT
 # ============================================================
+
+intents = discord.Intents.default()
+
+intents.members = True
+intents.message_content = True
+
+
+class VerificationBot(commands.Bot):
+
+    async def setup_hook(self):
+
+        self.add_view(
+            VerifyView()
+        )
+
+
+bot = VerificationBot(
+    command_prefix="$",
+    intents=intents
+)
+
 
 @bot.event
 async def on_ready():
@@ -617,11 +554,6 @@ async def on_ready():
 @commands.is_owner()
 async def setup_roles(ctx):
 
-    """
-    ONLY THE DISCORD OWNER OF THE BOT APPLICATION
-    CAN RUN THIS COMMAND.
-    """
-
     embed = discord.Embed(
         title="🎥 Creator Milestone Verification",
         description=(
@@ -638,7 +570,10 @@ async def setup_roles(ctx):
 
 
 @setup_roles.error
-async def setup_roles_error(ctx, error):
+async def setup_roles_error(
+    ctx,
+    error
+):
 
     if isinstance(
         error,
@@ -659,6 +594,13 @@ async def setup_roles_error(ctx, error):
 
 
 # ============================================================
+# FASTAPI
+# ============================================================
+
+app = FastAPI()
+
+
+# ============================================================
 # GOOGLE LOGIN
 # ============================================================
 
@@ -667,20 +609,12 @@ async def login(state: str):
 
     cleanup_expired_oauth_states()
 
-    # --------------------------------------------------------
-    # Validate state
-    # --------------------------------------------------------
-
     if state not in oauth_states:
 
         return HTMLResponse(
             "Invalid or expired verification session.",
             status_code=400
         )
-
-    # --------------------------------------------------------
-    # Validate Google configuration
-    # --------------------------------------------------------
 
     if (
         not GOOGLE_CLIENT_ID
@@ -691,10 +625,6 @@ async def login(state: str):
             "Google OAuth is not configured.",
             status_code=500
         )
-
-    # --------------------------------------------------------
-    # Google OAuth scopes
-    # --------------------------------------------------------
 
     scopes = [
         "openid",
@@ -740,11 +670,9 @@ async def login(state: str):
 # ============================================================
 
 @app.get("/callback")
-async def callback(request: Request):
-
-    # --------------------------------------------------------
-    # Check for OAuth errors
-    # --------------------------------------------------------
+async def callback(
+    request: Request
+):
 
     error = request.query_params.get(
         "error"
@@ -764,10 +692,6 @@ async def callback(request: Request):
             status_code=400
         )
 
-    # --------------------------------------------------------
-    # Get OAuth code and state
-    # --------------------------------------------------------
-
     code = request.query_params.get(
         "code"
     )
@@ -783,10 +707,6 @@ async def callback(request: Request):
             status_code=400
         )
 
-    # --------------------------------------------------------
-    # Validate OAuth state
-    # --------------------------------------------------------
-
     state_data = oauth_states.pop(
         state,
         None
@@ -798,10 +718,6 @@ async def callback(request: Request):
             "This verification session is invalid or expired.",
             status_code=400
         )
-
-    # --------------------------------------------------------
-    # Check state expiration
-    # --------------------------------------------------------
 
     created_at = state_data[
         "created_at"
@@ -829,10 +745,6 @@ async def callback(request: Request):
         "guild_id"
     ]
 
-    # --------------------------------------------------------
-    # Check Discord verification status again
-    # --------------------------------------------------------
-
     existing_discord = (
         get_verification_by_discord(
             discord_user_id
@@ -845,10 +757,6 @@ async def callback(request: Request):
             "This Discord account is already verified.",
             status_code=400
         )
-
-    # --------------------------------------------------------
-    # Exchange Google authorization code
-    # --------------------------------------------------------
 
     try:
 
@@ -892,10 +800,6 @@ async def callback(request: Request):
             status_code=400
         )
 
-    # --------------------------------------------------------
-    # Get Google account identity
-    # --------------------------------------------------------
-
     google_user = await asyncio.to_thread(
         get_google_user,
         access_token
@@ -924,10 +828,6 @@ async def callback(request: Request):
             status_code=400
         )
 
-    # --------------------------------------------------------
-    # DUPLICATE GOOGLE ACCOUNT CHECK
-    # --------------------------------------------------------
-
     existing_google = (
         get_verification_by_google_sub(
             google_sub
@@ -939,6 +839,7 @@ async def callback(request: Request):
         return HTMLResponse(
             """
             <h2>Already verified</h2>
+
             <p>
             This Google account is already verified.
             You cannot verify the same Google account again.
@@ -946,10 +847,6 @@ async def callback(request: Request):
             """,
             status_code=400
         )
-
-    # --------------------------------------------------------
-    # Get ALL YouTube channels
-    # --------------------------------------------------------
 
     youtube_result = await asyncio.to_thread(
         get_all_youtube_channels,
@@ -987,10 +884,6 @@ async def callback(request: Request):
             status_code=400
         )
 
-    # --------------------------------------------------------
-    # Check every channel for duplicate verification
-    # --------------------------------------------------------
-
     for channel in channels:
 
         channel_id = channel[
@@ -1022,10 +915,6 @@ async def callback(request: Request):
                 status_code=400
             )
 
-    # --------------------------------------------------------
-    # Aggregate ALL channels
-    # --------------------------------------------------------
-
     total_subscribers = sum(
         channel["subscribers"]
         for channel in channels
@@ -1036,12 +925,33 @@ async def callback(request: Request):
         for channel in channels
     )
 
-    print("--------------------------------")
-    print("NEW VERIFICATION")
-    print("Discord ID:", discord_user_id)
-    print("Google:", google_email)
-    print("Guild ID:", guild_id)
-    print("Channels:", len(channels))
+    print(
+        "--------------------------------"
+    )
+
+    print(
+        "NEW VERIFICATION"
+    )
+
+    print(
+        "Discord ID:",
+        discord_user_id
+    )
+
+    print(
+        "Google:",
+        google_email
+    )
+
+    print(
+        "Guild ID:",
+        guild_id
+    )
+
+    print(
+        "Channels:",
+        len(channels)
+    )
 
     for channel in channels:
 
@@ -1063,32 +973,19 @@ async def callback(request: Request):
         "views"
     )
 
-    print("--------------------------------")
-
-    # --------------------------------------------------------
-    # Save everything atomically
-    # --------------------------------------------------------
+    print(
+        "--------------------------------"
+    )
 
     try:
 
         save_verification_and_channels(
-            discord_user_id=
-                discord_user_id,
-
-            google_sub=
-                google_sub,
-
-            google_email=
-                google_email,
-
-            total_subscribers=
-                total_subscribers,
-
-            total_views=
-                total_views,
-
-            channels=
-                channels
+            discord_user_id=discord_user_id,
+            google_sub=google_sub,
+            google_email=google_email,
+            total_subscribers=total_subscribers,
+            total_views=total_views,
+            channels=channels
         )
 
     except sqlite3.IntegrityError:
@@ -1117,10 +1014,6 @@ async def callback(request: Request):
             status_code=500
         )
 
-    # --------------------------------------------------------
-    # Assign Discord roles in the correct guild
-    # --------------------------------------------------------
-
     asyncio.run_coroutine_threadsafe(
         assign_roles(
             guild_id,
@@ -1131,20 +1024,12 @@ async def callback(request: Request):
         bot.loop
     )
 
-    # --------------------------------------------------------
-    # Close verification channel later
-    # --------------------------------------------------------
-
     asyncio.run_coroutine_threadsafe(
         close_verification_channel(
             discord_user_id
         ),
         bot.loop
     )
-
-    # --------------------------------------------------------
-    # Success page
-    # --------------------------------------------------------
 
     channel_text = "<br>".join(
         f"• {html.escape(channel['title'])}"
@@ -1205,10 +1090,12 @@ async def callback(request: Request):
 
 
 # ============================================================
-# GOOGLE TOKEN EXCHANGE
+# GOOGLE / YOUTUBE HELPERS
 # ============================================================
 
-def exchange_code_for_token(code):
+def exchange_code_for_token(
+    code
+):
 
     response = requests.post(
         "https://oauth2.googleapis.com/token",
@@ -1238,11 +1125,9 @@ def exchange_code_for_token(code):
     return response.json()
 
 
-# ============================================================
-# GOOGLE USER INFO
-# ============================================================
-
-def get_google_user(access_token):
+def get_google_user(
+    access_token
+):
 
     response = requests.get(
         "https://openidconnect.googleapis.com/v1/userinfo",
@@ -1267,11 +1152,9 @@ def get_google_user(access_token):
     return response.json()
 
 
-# ============================================================
-# GET ALL YOUTUBE CHANNELS
-# ============================================================
-
-def get_all_youtube_channels(access_token):
+def get_all_youtube_channels(
+    access_token
+):
 
     channels = []
 
@@ -1441,10 +1324,6 @@ async def assign_roles(
 
     roles_to_add = []
 
-    # --------------------------------------------------------
-    # SUBSCRIBER MILESTONES
-    # --------------------------------------------------------
-
     subscriber_milestones = [
         (
             50_000,
@@ -1471,13 +1350,10 @@ async def assign_roles(
             )
 
             if role:
+
                 roles_to_add.append(
                     role
                 )
-
-    # --------------------------------------------------------
-    # VIEW MILESTONES
-    # --------------------------------------------------------
 
     view_milestones = [
         (
@@ -1515,13 +1391,10 @@ async def assign_roles(
             )
 
             if role:
+
                 roles_to_add.append(
                     role
                 )
-
-    # --------------------------------------------------------
-    # ADD ROLES
-    # --------------------------------------------------------
 
     if not roles_to_add:
 
@@ -1570,7 +1443,9 @@ async def close_verification_channel(
     discord_user_id
 ):
 
-    await asyncio.sleep(15)
+    await asyncio.sleep(
+        15
+    )
 
     channel_id = (
         active_verification_channels.pop(
@@ -1592,8 +1467,7 @@ async def close_verification_channel(
     try:
 
         await channel.delete(
-            reason=
-                "YouTube verification completed"
+            reason="YouTube verification completed"
         )
 
     except discord.NotFound:
@@ -1702,6 +1576,8 @@ if __name__ == "__main__":
 
     validate_configuration()
 
+    init_database()
+
     print(
         "===================================="
     )
@@ -1729,7 +1605,6 @@ if __name__ == "__main__":
         "===================================="
     )
 
-    # Start Discord in a background thread.
     bot_thread = threading.Thread(
         target=run_bot,
         daemon=True
@@ -1737,7 +1612,6 @@ if __name__ == "__main__":
 
     bot_thread.start()
 
-    # Start FastAPI on Render's assigned port.
     uvicorn.run(
         app,
         host="0.0.0.0",
@@ -1748,4 +1622,3 @@ if __name__ == "__main__":
             )
         )
     )
-```
