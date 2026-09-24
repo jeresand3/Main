@@ -1,3 +1,4 @@
+```python
 import os
 import html
 import sqlite3
@@ -1503,6 +1504,8 @@ async def homepage():
         <html>
 
         <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>PRINT Creator Verification</title>
         </head>
 
@@ -1536,9 +1539,154 @@ async def homepage():
             </p>
 
             <p>
-            A complete privacy policy should be published
-            before submitting the Google OAuth application
-            for production use.
+            <a href="/privacy">Read our Privacy Policy</a>
+            </p>
+
+        </body>
+
+        </html>
+        """
+    )
+
+
+# ============================================================
+# PRIVACY POLICY
+# ============================================================
+
+@app.get("/privacy")
+async def privacy_policy():
+
+    return HTMLResponse(
+        """
+        <!DOCTYPE html>
+
+        <html>
+
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>PRINT Creator Verification - Privacy Policy</title>
+        </head>
+
+        <body>
+
+            <h1>Privacy Policy</h1>
+
+            <p>
+            <strong>Last updated:</strong> September 24, 2026
+            </p>
+
+            <h2>1. What this application does</h2>
+
+            <p>
+            PRINT Creator Verification is a Discord verification
+            application that allows members of the PRINT Discord
+            server to verify YouTube creator milestones.
+            </p>
+
+            <p>
+            After a user authorizes the application through Google,
+            the application retrieves information from the user's
+            YouTube account to determine whether the user qualifies
+            for creator milestone roles in the PRINT Discord server.
+            </p>
+
+            <h2>2. Information we collect</h2>
+
+            <p>
+            When you use the verification system, the application
+            may receive and store:
+            </p>
+
+            <ul>
+                <li>Your Discord user ID</li>
+                <li>Your Google account identifier</li>
+                <li>Your Google account email address</li>
+                <li>Your YouTube channel ID</li>
+                <li>Your YouTube channel name</li>
+                <li>Your YouTube subscriber count</li>
+                <li>Your YouTube channel view count</li>
+                <li>The date and time of verification</li>
+            </ul>
+
+            <h2>3. How your information is used</h2>
+
+            <p>
+            The information obtained through Google and YouTube is
+            used to verify creator milestones and assign the
+            corresponding roles within the PRINT Discord server.
+            </p>
+
+            <p>
+            The information is not used to provide advertising,
+            sell personal information, or build advertising profiles.
+            </p>
+
+            <h2>4. Google and YouTube access</h2>
+
+            <p>
+            The application uses Google's OAuth authorization system.
+            You choose whether to grant the requested permissions.
+            </p>
+
+            <p>
+            The application requests access necessary to identify
+            your Google account and retrieve YouTube channel
+            information required for verification.
+            </p>
+
+            <p>
+            You can revoke the application's access to your Google
+            account through your Google Account security settings.
+            </p>
+
+            <h2>5. Data storage</h2>
+
+            <p>
+            Verification information is stored by the application
+            so that a verified Discord account or YouTube channel
+            cannot simply be verified repeatedly.
+            </p>
+
+            <h2>6. Data sharing</h2>
+
+            <p>
+            Verification information is not sold or shared with
+            third parties for advertising purposes.
+            </p>
+
+            <p>
+            The application may interact with Google, YouTube,
+            Discord, and the hosting provider as necessary to
+            operate the verification system.
+            </p>
+
+            <h2>7. Data deletion</h2>
+
+            <p>
+            If you want your stored verification information removed,
+            contact the administrators of the PRINT Discord server.
+            Requests can be reviewed and handled by the application
+            administrators.
+            </p>
+
+            <h2>8. Changes to this policy</h2>
+
+            <p>
+            This Privacy Policy may be updated when the verification
+            system or its data practices change.
+            </p>
+
+            <h2>9. Contact</h2>
+
+            <p>
+            For questions about this Privacy Policy or the
+            verification system, contact the administrators of the
+            PRINT Discord server.
+            </p>
+
+            <p>
+            <a href="/">Return to PRINT Creator Verification</a>
             </p>
 
         </body>
@@ -1622,3 +1770,4 @@ if __name__ == "__main__":
             )
         )
     )
+```
