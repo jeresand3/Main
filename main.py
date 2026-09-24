@@ -1,4 +1,3 @@
-```python
 import os
 import html
 import sqlite3
@@ -1770,4 +1769,3 @@ if __name__ == "__main__":
             )
         )
     )
-```
