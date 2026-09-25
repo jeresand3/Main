@@ -1,3 +1,4 @@
+import re
 import os
 import html
 import sqlite3
@@ -380,7 +381,16 @@ class VerifyButton(Button):
 
             return
 
-        channel_name = f"verify-{user.id}"
+        username = re.sub(
+    r"[^a-zA-Z0-9_-]",
+    "-",
+    user.name
+).strip("-").lower()
+
+if not username:
+    username = str(user.id)
+
+channel_name = f"verify-{username}"[:100]
 
         try:
 
