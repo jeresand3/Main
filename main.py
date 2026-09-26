@@ -1,4 +1,3 @@
-```python
 import re
 import os
 import html
@@ -2610,4 +2609,3 @@ if __name__ == "__main__":
             )
         )
     )
-```
