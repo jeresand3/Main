@@ -348,6 +348,7 @@ class VerifyButton(Button):
         )
 
         if existing_channel_id:
+
         category = guild.get_channel(
             TICKET_CATEGORY_ID
         )
