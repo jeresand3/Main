@@ -153,6 +153,23 @@ def init_database():
             )
         """)
 
+        # ----------------------------------------------------
+        # ACTIVE TICKETS
+        #
+        # This is the important fix.
+        #
+        # One Discord user can have only ONE row here.
+        # The information survives bot restarts/redeploys.
+        # ----------------------------------------------------
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS active_tickets (
+                discord_user_id TEXT PRIMARY KEY,
+                guild_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
         # If an older database already has verification data,
         # copy it into the new multi-account table.
         cursor.execute("""
@@ -334,15 +351,151 @@ def save_google_account_and_channels(
 
 
 # ============================================================
+# ACTIVE TICKET DATABASE FUNCTIONS
+# ============================================================
+
+def get_active_ticket(discord_user_id):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                discord_user_id,
+                guild_id,
+                channel_id,
+                created_at
+            FROM active_tickets
+            WHERE discord_user_id = ?
+        """, (str(discord_user_id),))
+
+        return cursor.fetchone()
+
+    finally:
+
+        conn.close()
+
+
+def create_active_ticket(
+    discord_user_id,
+    guild_id,
+    channel_id
+):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            INSERT INTO active_tickets (
+                discord_user_id,
+                guild_id,
+                channel_id,
+                created_at
+            )
+            VALUES (?, ?, ?, ?)
+        """, (
+            str(discord_user_id),
+            str(guild_id),
+            str(channel_id),
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        ))
+
+        conn.commit()
+
+        return True
+
+    except sqlite3.IntegrityError:
+
+        return False
+
+    finally:
+
+        conn.close()
+
+
+def delete_active_ticket(discord_user_id):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            DELETE FROM active_tickets
+            WHERE discord_user_id = ?
+        """, (str(discord_user_id),))
+
+        conn.commit()
+
+    finally:
+
+        conn.close()
+
+
+def delete_active_ticket_by_channel(channel_id):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            DELETE FROM active_tickets
+            WHERE channel_id = ?
+        """, (str(channel_id),))
+
+        conn.commit()
+
+    finally:
+
+        conn.close()
+
+
+def update_active_ticket_channel(
+    discord_user_id,
+    channel_id
+):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            UPDATE active_tickets
+            SET channel_id = ?
+            WHERE discord_user_id = ?
+        """, (
+            str(channel_id),
+            str(discord_user_id)
+        ))
+
+        conn.commit()
+
+    finally:
+
+        conn.close()
+
+
+# ============================================================
 # OAUTH STATE
 # ============================================================
 
 oauth_states = {}
 
-active_verification_channels = {}
-
 # Prevents two very fast Verify button clicks
-# from creating two tickets.
+# from creating two tickets in the same bot process.
 verification_creation_locks = {}
 
 
@@ -462,7 +615,7 @@ class CloseTicketButton(Button):
 
             return
 
-        # The server/bot owner cannot be removed.
+        # The bot owner cannot be removed.
         try:
 
             if await bot.is_owner(user):
@@ -481,6 +634,34 @@ class CloseTicketButton(Button):
                 repr(e)
             )
 
+        # ----------------------------------------------------
+        # MAKE SURE THIS IS THE USER'S ACTIVE TICKET
+        # ----------------------------------------------------
+
+        active_ticket = get_active_ticket(
+            user.id
+        )
+
+        if not active_ticket:
+
+            await interaction.response.send_message(
+                "❌ This is not an active verification ticket.",
+                ephemeral=True
+            )
+
+            return
+
+        active_channel_id = active_ticket[2]
+
+        if str(active_channel_id) != str(channel.id):
+
+            await interaction.response.send_message(
+                "❌ This is not your active verification ticket.",
+                ephemeral=True
+            )
+
+            return
+
         try:
 
             # Remove the member's access to the ticket.
@@ -491,9 +672,10 @@ class CloseTicketButton(Button):
                 read_message_history=False
             )
 
-            active_verification_channels.pop(
-                user.id,
-                None
+            # The ticket is now closed, so remove it
+            # from the permanent active-ticket database.
+            delete_active_ticket(
+                user.id
             )
 
             await interaction.response.send_message(
@@ -516,7 +698,7 @@ class CloseTicketButton(Button):
             )
 
             await interaction.response.send_message(
-                "❌ Something went wrong while closing the ticket.",
+                "❌ Something went wrong while closing this ticket.",
                 ephemeral=True
             )
 
@@ -613,33 +795,54 @@ class VerifyButton(Button):
 
         async with lock:
 
-            existing_channel_id = (
-                active_verification_channels.get(
-                    user.id
-                )
+            # ------------------------------------------------
+            # CHECK SQLITE FOR AN EXISTING TICKET
+            # ------------------------------------------------
+
+            active_ticket = get_active_ticket(
+                user.id
             )
 
-            if existing_channel_id:
+            if active_ticket:
 
-                existing_channel = guild.get_channel(
-                    existing_channel_id
-                )
+                existing_guild_id = active_ticket[1]
+                existing_channel_id = active_ticket[2]
 
-                if existing_channel:
+                # Only use the record if it belongs to
+                # this Discord server.
+                if str(existing_guild_id) == str(guild.id):
 
-                    await interaction.response.send_message(
-                        "❌ You already have an active "
-                        f"verification channel: {existing_channel.mention}",
-                        ephemeral=True
+                    existing_channel = guild.get_channel(
+                        int(existing_channel_id)
                     )
 
-                    return
+                    if existing_channel:
 
-                # Channel was deleted manually.
-                active_verification_channels.pop(
-                    user.id,
-                    None
-                )
+                        await interaction.response.send_message(
+                            "❌ You already have an active "
+                            f"verification channel: {existing_channel.mention}",
+                            ephemeral=True
+                        )
+
+                        return
+
+                    # The database says the ticket exists,
+                    # but the Discord channel no longer exists.
+                    # Remove the stale database record.
+                    delete_active_ticket(
+                        user.id
+                    )
+
+                else:
+
+                    # Stale record from another guild.
+                    delete_active_ticket(
+                        user.id
+                    )
+
+            # ------------------------------------------------
+            # FIND TICKET CATEGORY
+            # ------------------------------------------------
 
             category = guild.get_channel(
                 TICKET_CATEGORY_ID
@@ -667,6 +870,10 @@ class VerifyButton(Button):
                 )
 
             channel_name = f"verify-{username}"[:100]
+
+            # ------------------------------------------------
+            # CREATE THE DISCORD TICKET
+            # ------------------------------------------------
 
             try:
 
@@ -719,9 +926,64 @@ class VerifyButton(Button):
 
                 return
 
-            active_verification_channels[
-                user.id
-            ] = channel.id
+            # ------------------------------------------------
+            # SAVE THE ACTIVE TICKET TO SQLITE
+            # ------------------------------------------------
+
+            ticket_saved = create_active_ticket(
+                user.id,
+                guild.id,
+                channel.id
+            )
+
+            # If another process created a ticket at the
+            # same time, do not allow this second ticket
+            # to remain active.
+            if not ticket_saved:
+
+                existing_ticket = get_active_ticket(
+                    user.id
+                )
+
+                try:
+
+                    await channel.delete(
+                        reason="Duplicate verification ticket"
+                    )
+
+                except Exception as e:
+
+                    print(
+                        "Could not delete duplicate ticket:",
+                        repr(e)
+                    )
+
+                if existing_ticket:
+
+                    existing_channel = guild.get_channel(
+                        int(existing_ticket[2])
+                    )
+
+                    if existing_channel:
+
+                        await interaction.response.send_message(
+                            "❌ You already have an active "
+                            f"verification channel: {existing_channel.mention}",
+                            ephemeral=True
+                        )
+
+                        return
+
+                await interaction.response.send_message(
+                    "❌ You already have an active verification ticket.",
+                    ephemeral=True
+                )
+
+                return
+
+            # ------------------------------------------------
+            # SEND TICKET CONTROLS
+            # ------------------------------------------------
 
             try:
 
@@ -797,6 +1059,18 @@ async def on_ready():
 
     print(
         f"Connected to {len(bot.guilds)} Discord server(s)."
+    )
+
+
+# ============================================================
+# CLEAN UP IF A TICKET CHANNEL IS MANUALLY DELETED
+# ============================================================
+
+@bot.event
+async def on_guild_channel_delete(channel):
+
+    delete_active_ticket_by_channel(
+        channel.id
     )
 
 
@@ -1006,7 +1280,7 @@ async def callback(
     # --------------------------------------------------------
     # DO NOT BLOCK THE DISCORD ACCOUNT HERE.
     #
-    # This is what allows the same ticket to connect
+    # This allows the same ticket to connect
     # another Google account.
     # --------------------------------------------------------
 
@@ -1281,7 +1555,7 @@ async def callback(
         )
 
     # --------------------------------------------------------
-    # GET COMBINED TOTALS FROM EVERY ACCOUNT IN THIS TICKET
+    # GET COMBINED TOTALS FROM EVERY ACCOUNT
     # --------------------------------------------------------
 
     combined_subscribers, combined_views = (
@@ -1314,8 +1588,6 @@ async def callback(
 
     # --------------------------------------------------------
     # SEND ANOTHER CONNECT BUTTON INTO THE SAME TICKET
-    #
-    # This is what lets the member add another Google account.
     # --------------------------------------------------------
 
     ticket_channel = None
@@ -1328,16 +1600,16 @@ async def callback(
 
     if ticket_channel is None:
 
-        active_channel_id = (
-            active_verification_channels.get(
-                discord_user_id
-            )
+        active_ticket = get_active_ticket(
+            discord_user_id
         )
 
-        if active_channel_id:
+        if active_ticket:
+
+            active_channel_id = active_ticket[2]
 
             ticket_channel = bot.get_channel(
-                active_channel_id
+                int(active_channel_id)
             )
 
     if ticket_channel is not None:
