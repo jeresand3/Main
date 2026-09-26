@@ -348,26 +348,6 @@ class VerifyButton(Button):
         )
 
         if existing_channel_id:
-
-            existing_channel = guild.get_channel(
-                existing_channel_id
-            )
-
-            if existing_channel:
-
-                await interaction.response.send_message(
-                    "❌ You already have an active "
-                    f"verification channel: {existing_channel.mention}",
-                    ephemeral=True
-                )
-
-                return
-
-            active_verification_channels.pop(
-                user.id,
-                None
-            )
-
         category = guild.get_channel(
             TICKET_CATEGORY_ID
         )
@@ -382,15 +362,15 @@ class VerifyButton(Button):
             return
 
         username = re.sub(
-    r"[^a-zA-Z0-9_-]",
-    "-",
-    user.name
-).strip("-").lower()
+            r"[^a-zA-Z0-9_-]",
+            "-",
+            user.name
+        ).strip("-").lower()
 
-if not username:
-    username = str(user.id)
+        if not username:
+            username = str(user.id)
 
-channel_name = f"verify-{username}"[:100]
+        channel_name = f"verify-{username}"[:100]
 
         try:
 
