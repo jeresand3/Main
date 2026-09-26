@@ -112,15 +112,11 @@ def init_database():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS verifications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-
                 discord_user_id TEXT NOT NULL UNIQUE,
-
                 google_sub TEXT NOT NULL UNIQUE,
                 google_email TEXT NOT NULL,
-
                 total_subscribers INTEGER NOT NULL,
                 total_views INTEGER NOT NULL,
-
                 verified_at TEXT NOT NULL
             )
         """)
@@ -128,14 +124,10 @@ def init_database():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS verified_channels (
                 channel_id TEXT PRIMARY KEY,
-
                 discord_user_id TEXT NOT NULL,
-
                 channel_title TEXT NOT NULL,
-
                 subscriber_count INTEGER NOT NULL,
                 view_count INTEGER NOT NULL,
-
                 verified_at TEXT NOT NULL
             )
         """)
@@ -348,6 +340,25 @@ class VerifyButton(Button):
         )
 
         if existing_channel_id:
+
+            existing_channel = guild.get_channel(
+                existing_channel_id
+            )
+
+            if existing_channel:
+
+                await interaction.response.send_message(
+                    "❌ You already have an active "
+                    f"verification channel: {existing_channel.mention}",
+                    ephemeral=True
+                )
+
+                return
+
+            active_verification_channels.pop(
+                user.id,
+                None
+            )
 
         category = guild.get_channel(
             TICKET_CATEGORY_ID
