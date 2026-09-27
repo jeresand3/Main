@@ -866,10 +866,6 @@ class VerifyButton(Button):
 
         cleanup_expired_oauth_states()
 
-        # ----------------------------------------------------
-        # LOCAL LOCK
-        # ----------------------------------------------------
-
         lock = verification_creation_locks.setdefault(
             user.id,
             asyncio.Lock()
@@ -877,70 +873,9 @@ class VerifyButton(Button):
 
         async with lock:
 
-            # ------------------------------------------------
-            # DATABASE ONE-TICKET CHECK
-            # ------------------------------------------------
-
-            active_ticket = get_active_ticket(
-                user.id
-            )
-
-            if active_ticket:
-
-                existing_guild_id = active_ticket[1]
-                existing_channel_id = active_ticket[2]
-
-                # Another process may currently be creating
-                # the ticket.
-                if existing_channel_id.startswith(
-                    "pending-"
-                ):
-
-                    await interaction.response.send_message(
-                        "❌ Your verification ticket is already being created. Please wait a moment.",
-                        ephemeral=True
-                    )
-
-                    return
-
-                # Try to find the existing Discord channel.
-                existing_channel = guild.get_channel(
-                    int(existing_channel_id)
-                )
-
-                if existing_channel:
-
-                    await interaction.response.send_message(
-                        "❌ You already have an active "
-                        f"verification channel: {existing_channel.mention}",
-                        ephemeral=True
-                    )
-
-                    return
-
-                # ------------------------------------------------
-                # CHANNEL NO LONGER EXISTS.
-                #
-                # Remove the stale database record so the member
-                # can create a new ticket.
-                # ------------------------------------------------
-
-                delete_active_ticket(
-                    user.id
-                )
-
-            # ------------------------------------------------
-            # ATOMIC DATABASE RESERVATION
-            # ------------------------------------------------
-            #
-            # THIS IS THE MAIN FIX.
-            #
-            # The member is claimed in SQLite BEFORE Discord
-            # channel creation.
-            #
-            # If two bot processes receive the same click,
-            # only one can reserve this member.
-            # ------------------------------------------------
+            # The database reservation is the single source of truth.
+            # Never delete an existing reservation just because
+            # guild.get_channel() cannot see the channel.
 
             reservation = reserve_ticket_slot(
                 user.id,
@@ -953,7 +888,9 @@ class VerifyButton(Button):
 
                 if existing:
 
-                    existing_channel_id = existing[2]
+                    existing_channel_id = str(
+                        existing[2]
+                    )
 
                     if existing_channel_id.startswith(
                         "pending-"
@@ -972,7 +909,7 @@ class VerifyButton(Button):
                             int(existing_channel_id)
                         )
 
-                    except ValueError:
+                    except (ValueError, TypeError):
 
                         existing_channel = None
 
@@ -984,40 +921,23 @@ class VerifyButton(Button):
                             ephemeral=True
                         )
 
-                        return
+                    else:
 
-                    # Stale entry.
-                    delete_active_ticket(
-                        user.id
-                    )
-
-                    # Try one final reservation.
-                    reservation = reserve_ticket_slot(
-                        user.id,
-                        guild.id
-                    )
-
-                    if not reservation["reserved"]:
-
+                        # Do NOT delete the reservation here.
+                        # The database reservation remains authoritative.
                         await interaction.response.send_message(
                             "❌ You already have an active verification ticket.",
                             ephemeral=True
                         )
 
-                        return
-
-                else:
-
-                    await interaction.response.send_message(
-                        "❌ You already have an active verification ticket.",
-                        ephemeral=True
-                    )
-
                     return
 
-            # ------------------------------------------------
-            # FIND CATEGORY
-            # ------------------------------------------------
+                await interaction.response.send_message(
+                    "❌ You already have an active verification ticket.",
+                    ephemeral=True
+                )
+
+                return
 
             category = guild.get_channel(
                 TICKET_CATEGORY_ID
@@ -1036,10 +956,6 @@ class VerifyButton(Button):
 
                 return
 
-            # ------------------------------------------------
-            # CHANNEL NAME
-            # ------------------------------------------------
-
             username = re.sub(
                 r"[^a-zA-Z0-9_-]",
                 "-",
@@ -1055,10 +971,6 @@ class VerifyButton(Button):
             channel_name = (
                 f"verify-{username}"
             )[:100]
-
-            # ------------------------------------------------
-            # CREATE DISCORD CHANNEL
-            # ------------------------------------------------
 
             try:
 
@@ -1121,10 +1033,6 @@ class VerifyButton(Button):
                 )
 
                 return
-
-            # ------------------------------------------------
-            # SAVE THE REAL CHANNEL ID
-            # ------------------------------------------------
 
             set_active_ticket_channel(
                 user.id,
