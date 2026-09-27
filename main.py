@@ -103,6 +103,16 @@ def get_connection():
         "PRAGMA foreign_keys = ON"
     )
 
+    # Safer SQLite behavior when more than one operation
+    # touches the database at nearly the same time.
+    conn.execute(
+        "PRAGMA journal_mode = WAL"
+    )
+
+    conn.execute(
+        "PRAGMA busy_timeout = 30000"
+    )
+
     return conn
 
 
@@ -162,10 +172,10 @@ def init_database():
         # ----------------------------------------------------
         # ACTIVE TICKETS
         #
-        # THIS IS THE IMPORTANT FIX.
+        # discord_user_id is PRIMARY KEY.
         #
-        # discord_user_id is PRIMARY KEY, meaning only ONE
-        # active ticket can exist for each Discord member.
+        # Therefore SQLite physically cannot store two active
+        # ticket reservations for the same Discord user.
         # ----------------------------------------------------
 
         cursor.execute("""
@@ -199,6 +209,7 @@ def init_database():
         conn.commit()
 
     finally:
+
         conn.close()
 
 
@@ -223,6 +234,7 @@ def get_google_account_by_sub(google_sub):
         return cursor.fetchone()
 
     finally:
+
         conn.close()
 
 
@@ -243,6 +255,7 @@ def get_accounts_for_discord(discord_user_id):
         return cursor.fetchall()
 
     finally:
+
         conn.close()
 
 
@@ -263,6 +276,7 @@ def get_verified_channel(channel_id):
         return cursor.fetchone()
 
     finally:
+
         conn.close()
 
 
@@ -290,6 +304,7 @@ def get_aggregate_totals(discord_user_id):
         )
 
     finally:
+
         conn.close()
 
 
@@ -394,11 +409,11 @@ def reserve_ticket_slot(
     """
     Atomically reserves the member's one allowed ticket.
 
-    This happens BEFORE Discord creates the channel.
+    The reservation happens BEFORE Discord channel creation.
 
-    If another bot process is already creating a ticket for
-    this same member, the UNIQUE PRIMARY KEY prevents a second
-    process from claiming the member.
+    The reservation is deliberately kept if Discord temporarily
+    fails. This prevents an API failure from allowing a second
+    ticket to be created.
     """
 
     conn = get_connection()
@@ -408,9 +423,10 @@ def reserve_ticket_slot(
         cursor = conn.cursor()
 
         # Force SQLite to obtain the write lock before checking
-        # and inserting. This protects against simultaneous
-        # bot processes.
-        cursor.execute("BEGIN IMMEDIATE")
+        # and inserting.
+        cursor.execute(
+            "BEGIN IMMEDIATE"
+        )
 
         cursor.execute("""
             SELECT
@@ -563,10 +579,6 @@ def delete_active_ticket_by_channel(channel_id):
 
 oauth_states = {}
 
-# Local lock still exists as an extra layer.
-#
-# The DATABASE active_tickets table is the important protection
-# because the local lock only protects one running process.
 verification_creation_locks = {}
 
 
@@ -686,10 +698,6 @@ class CloseTicketButton(Button):
 
             return
 
-        # ----------------------------------------------------
-        # MAKE SURE THIS IS THE USER'S ACTIVE TICKET
-        # ----------------------------------------------------
-
         active_ticket = get_active_ticket(
             user.id
         )
@@ -703,11 +711,13 @@ class CloseTicketButton(Button):
 
             return
 
-        active_channel_id = active_ticket[2]
+        active_channel_id = str(
+            active_ticket[2]
+        )
 
         if (
             active_channel_id.startswith("pending-")
-            or str(channel.id) != str(active_channel_id)
+            or str(channel.id) != active_channel_id
         ):
 
             await interaction.response.send_message(
@@ -740,6 +750,25 @@ class CloseTicketButton(Button):
             )
 
         # ----------------------------------------------------
+        # ACKNOWLEDGE FIRST
+        # ----------------------------------------------------
+
+        try:
+
+            await interaction.response.defer(
+                ephemeral=True
+            )
+
+        except Exception as e:
+
+            print(
+                "Close-ticket interaction defer error:",
+                repr(e)
+            )
+
+            return
+
+        # ----------------------------------------------------
         # CLOSE TICKET
         # ----------------------------------------------------
 
@@ -756,15 +785,27 @@ class CloseTicketButton(Button):
                 user.id
             )
 
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "✅ Your verification ticket has been closed.",
                 ephemeral=True
             )
 
         except discord.Forbidden:
 
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ I don't have permission to close this ticket.",
+                ephemeral=True
+            )
+
+        except discord.HTTPException as e:
+
+            print(
+                "Close-ticket Discord HTTP error:",
+                repr(e)
+            )
+
+            await interaction.followup.send(
+                "❌ Discord temporarily rejected the ticket-close request. Please try again.",
                 ephemeral=True
             )
 
@@ -775,7 +816,7 @@ class CloseTicketButton(Button):
                 repr(e)
             )
 
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ Something went wrong while closing this ticket.",
                 ephemeral=True
             )
@@ -834,6 +875,58 @@ async def send_verification_controls(
 
 
 # ============================================================
+# TICKET RECOVERY HELPERS
+# ============================================================
+
+def find_existing_ticket_channel(
+    guild,
+    channel_name,
+    category
+):
+    """
+    Searches Discord's currently cached guild channels for a
+    matching ticket.
+
+    This is used after an uncertain Discord API failure so the
+    bot can adopt an already-created channel instead of creating
+    another one.
+    """
+
+    for existing_channel in guild.text_channels:
+
+        if existing_channel.name != channel_name:
+            continue
+
+        if category is not None:
+
+            if existing_channel.category_id != category.id:
+                continue
+
+        return existing_channel
+
+    return None
+
+
+def build_ticket_channel_name(user):
+
+    username = re.sub(
+        r"[^a-zA-Z0-9_-]",
+        "-",
+        user.name
+    ).strip("-").lower()
+
+    if not username:
+
+        username = str(
+            user.id
+        )
+
+    return (
+        f"verify-{username}"
+    )[:100]
+
+
+# ============================================================
 # DISCORD VERIFICATION BUTTON
 # ============================================================
 
@@ -873,9 +966,9 @@ class VerifyButton(Button):
 
         async with lock:
 
-            # The database reservation is the single source of truth.
-            # Never delete an existing reservation just because
-            # guild.get_channel() cannot see the channel.
+            # ------------------------------------------------
+            # DATABASE RESERVATION
+            # ------------------------------------------------
 
             reservation = reserve_ticket_slot(
                 user.id,
@@ -888,9 +981,17 @@ class VerifyButton(Button):
 
                 if existing:
 
+                    existing_guild_id = str(
+                        existing[1]
+                    )
+
                     existing_channel_id = str(
                         existing[2]
                     )
+
+                    # ----------------------------------------
+                    # A TICKET IS CURRENTLY BEING CREATED
+                    # ----------------------------------------
 
                     if existing_channel_id.startswith(
                         "pending-"
@@ -898,6 +999,19 @@ class VerifyButton(Button):
 
                         await interaction.response.send_message(
                             "❌ Your verification ticket is already being created. Please wait a moment.",
+                            ephemeral=True
+                        )
+
+                        return
+
+                    # ----------------------------------------
+                    # EXISTING CHANNEL
+                    # ----------------------------------------
+
+                    if existing_guild_id != str(guild.id):
+
+                        await interaction.response.send_message(
+                            "❌ You already have an active verification ticket.",
                             ephemeral=True
                         )
 
@@ -923,10 +1037,18 @@ class VerifyButton(Button):
 
                     else:
 
-                        # Do NOT delete the reservation here.
-                        # The database reservation remains authoritative.
+                        # IMPORTANT:
+                        #
+                        # Do NOT delete the reservation.
+                        #
+                        # Discord may temporarily fail to return
+                        # the channel because of cache/API state.
+                        #
+                        # Keeping the reservation guarantees that
+                        # another click cannot create a second one.
                         await interaction.response.send_message(
-                            "❌ You already have an active verification ticket.",
+                            "❌ You already have an active verification ticket. "
+                            "Please wait or contact the server administrator if the ticket is not visible.",
                             ephemeral=True
                         )
 
@@ -939,38 +1061,110 @@ class VerifyButton(Button):
 
                 return
 
+            # ------------------------------------------------
+            # ACKNOWLEDGE THE INTERACTION EARLY
+            #
+            # Discord interactions have a short initial response
+            # window. Deferring here prevents channel creation/API
+            # delays from causing an interaction timeout.
+            # ------------------------------------------------
+
+            try:
+
+                await interaction.response.defer(
+                    ephemeral=True
+                )
+
+            except Exception as e:
+
+                print(
+                    "Verification interaction defer error:",
+                    repr(e)
+                )
+
+                # IMPORTANT:
+                #
+                # The database reservation remains.
+                #
+                # We do NOT delete it here because another
+                # process/click must not be allowed to create
+                # a second ticket.
+                return
+
+            # ------------------------------------------------
+            # FIND CATEGORY
+            # ------------------------------------------------
+
             category = guild.get_channel(
                 TICKET_CATEGORY_ID
             )
 
             if category is None:
 
+                # The category genuinely cannot be found.
+                # This is a configuration problem, not a rate
+                # limit problem.
                 delete_active_ticket(
                     user.id
                 )
 
-                await interaction.response.send_message(
-                    "❌ Verification category could not be found.",
+                await interaction.followup.send(
+                    "❌ Verification category could not be found. "
+                    "The reservation was released because no ticket could be created.",
                     ephemeral=True
                 )
 
                 return
 
-            username = re.sub(
-                r"[^a-zA-Z0-9_-]",
-                "-",
-                user.name
-            ).strip("-").lower()
+            # ------------------------------------------------
+            # CHANNEL NAME
+            # ------------------------------------------------
 
-            if not username:
+            channel_name = build_ticket_channel_name(
+                user
+            )
 
-                username = str(
-                    user.id
+            # ------------------------------------------------
+            # SAFETY CHECK:
+            #
+            # If a channel already exists with the expected
+            # name/category, adopt it rather than creating
+            # another channel.
+            # ------------------------------------------------
+
+            existing_named_channel = find_existing_ticket_channel(
+                guild,
+                channel_name,
+                category
+            )
+
+            if existing_named_channel:
+
+                set_active_ticket_channel(
+                    user.id,
+                    existing_named_channel.id
                 )
 
-            channel_name = (
-                f"verify-{username}"
-            )[:100]
+                try:
+
+                    await interaction.followup.send(
+                        "✅ Your private verification channel is ready: "
+                        f"{existing_named_channel.mention}",
+                        ephemeral=True
+                    )
+
+                except Exception as e:
+
+                    print(
+                        "Could not send existing-channel response:",
+                        repr(e)
+                    )
+
+                return
+
+            # ------------------------------------------------
+            # CREATE CHANNEL
+            # ------------------------------------------------
 
             try:
 
@@ -1005,39 +1199,128 @@ class VerifyButton(Button):
 
             except discord.Forbidden:
 
+                # Discord explicitly rejected the operation.
+                # No ticket should have been created.
                 delete_active_ticket(
                     user.id
                 )
 
-                await interaction.response.send_message(
-                    "❌ I don't have permission to create verification channels.",
+                await interaction.followup.send(
+                    "❌ I don't have permission to create verification channels. "
+                    "The ticket reservation was released.",
                     ephemeral=True
                 )
+
+                return
+
+            except discord.HTTPException as e:
+
+                print(
+                    "Channel creation HTTP error:",
+                    repr(e)
+                )
+
+                # ------------------------------------------------
+                # DO NOT DELETE THE RESERVATION.
+                #
+                # A 429 or other HTTP failure can leave uncertainty
+                # about whether Discord actually created the
+                # channel. Releasing the reservation here could
+                # allow a second ticket.
+                # ------------------------------------------------
+
+                possible_channel = find_existing_ticket_channel(
+                    guild,
+                    channel_name,
+                    category
+                )
+
+                if possible_channel:
+
+                    set_active_ticket_channel(
+                        user.id,
+                        possible_channel.id
+                    )
+
+                    await interaction.followup.send(
+                        "✅ Your verification channel was created. "
+                        f"You can use it here: {possible_channel.mention}",
+                        ephemeral=True
+                    )
+
+                    return
+
+                if getattr(e, "status", None) == 429:
+
+                    await interaction.followup.send(
+                        "⚠️ Discord temporarily rate-limited the bot. "
+                        "Your ticket reservation is protected, so a second ticket cannot be created. "
+                        "Please wait a moment and try again.",
+                        ephemeral=True
+                    )
+
+                else:
+
+                    await interaction.followup.send(
+                        "⚠️ Discord temporarily rejected the ticket creation request. "
+                        "Your ticket reservation is protected, so a second ticket cannot be created. "
+                        "Please wait a moment and try again.",
+                        ephemeral=True
+                    )
 
                 return
 
             except Exception as e:
 
                 print(
-                    "Channel creation error:",
+                    "Channel creation unexpected error:",
                     repr(e)
                 )
 
-                delete_active_ticket(
-                    user.id
+                # Keep the reservation because the actual Discord
+                # result is uncertain.
+                possible_channel = find_existing_ticket_channel(
+                    guild,
+                    channel_name,
+                    category
                 )
 
-                await interaction.response.send_message(
-                    "❌ Something went wrong while creating your verification channel.",
+                if possible_channel:
+
+                    set_active_ticket_channel(
+                        user.id,
+                        possible_channel.id
+                    )
+
+                    await interaction.followup.send(
+                        "✅ Your verification channel is ready: "
+                        f"{possible_channel.mention}",
+                        ephemeral=True
+                    )
+
+                    return
+
+                await interaction.followup.send(
+                    "⚠️ The ticket creation request could not be confirmed. "
+                    "Your ticket reservation is protected so another ticket cannot be created. "
+                    "Please wait a moment and try again.",
                     ephemeral=True
                 )
 
                 return
 
+            # ------------------------------------------------
+            # SAVE ACTUAL DISCORD CHANNEL ID
+            # ------------------------------------------------
+
             set_active_ticket_channel(
                 user.id,
                 channel.id
             )
+
+            # ------------------------------------------------
+            # SEND TICKET CONTROLS
+            # ------------------------------------------------
 
             try:
 
@@ -1047,6 +1330,13 @@ class VerifyButton(Button):
                     channel
                 )
 
+            except discord.HTTPException as e:
+
+                print(
+                    "Could not send verification controls:",
+                    repr(e)
+                )
+
             except Exception as e:
 
                 print(
@@ -1054,13 +1344,26 @@ class VerifyButton(Button):
                     repr(e)
                 )
 
-            await interaction.response.send_message(
+            # ------------------------------------------------
+            # SUCCESS
+            # ------------------------------------------------
 
-                "✅ Your private verification channel is ready: "
-                f"{channel.mention}",
+            try:
 
-                ephemeral=True
-            )
+                await interaction.followup.send(
+
+                    "✅ Your private verification channel is ready: "
+                    f"{channel.mention}",
+
+                    ephemeral=True
+                )
+
+            except Exception as e:
+
+                print(
+                    "Could not send ticket success response:",
+                    repr(e)
+                )
 
 
 class VerifyView(View):
@@ -1090,10 +1393,12 @@ class VerificationBot(commands.Bot):
 
     async def setup_hook(self):
 
+        # Persistent verification button.
         self.add_view(
             VerifyView()
         )
 
+        # Persistent close-ticket button.
         self.add_view(
             CloseTicketView()
         )
@@ -1109,6 +1414,10 @@ bot = VerificationBot(
 async def on_ready():
 
     print(
+        "===================================="
+    )
+
+    print(
         f"Logged in as: {bot.user} "
         f"(ID: {bot.user.id})"
     )
@@ -1117,9 +1426,17 @@ async def on_ready():
         f"Connected to {len(bot.guilds)} Discord server(s)."
     )
 
+    print(
+        "Discord bot gateway connection is ACTIVE."
+    )
+
+    print(
+        "===================================="
+    )
+
 
 # ============================================================
-# CLEAN UP TICKET IF CHANNEL IS DELETED
+# CLEAN UP TICKET IF CHANNEL IS ACTUALLY DELETED
 # ============================================================
 
 @bot.event
@@ -1129,6 +1446,10 @@ async def on_guild_channel_delete(channel):
 
         delete_active_ticket_by_channel(
             channel.id
+        )
+
+        print(
+            f"Ticket database cleanup checked channel {channel.id}"
         )
 
     except Exception as e:
@@ -1709,23 +2030,32 @@ async def callback(
     # ADD ROLES
     # --------------------------------------------------------
 
-    asyncio.run_coroutine_threadsafe(
+    try:
 
-        assign_roles(
+        asyncio.run_coroutine_threadsafe(
 
-            guild_id,
+            assign_roles(
 
-            discord_user_id,
+                guild_id,
 
-            combined_subscribers,
+                discord_user_id,
 
-            combined_views
+                combined_subscribers,
 
-        ),
+                combined_views
 
-        bot.loop
+            ),
 
-    )
+            bot.loop
+
+        )
+
+    except Exception as e:
+
+        print(
+            "Could not schedule role assignment:",
+            repr(e)
+        )
 
     # --------------------------------------------------------
     # SEND ANOTHER CONNECT BUTTON
@@ -2098,6 +2428,15 @@ async def assign_roles(
 
             return
 
+        except discord.HTTPException as e:
+
+            print(
+                "Could not fetch Discord member:",
+                repr(e)
+            )
+
+            return
+
         except Exception as e:
 
             print(
@@ -2240,6 +2579,13 @@ async def assign_roles(
 
             "above the milestone roles."
 
+        )
+
+    except discord.HTTPException as e:
+
+        print(
+            "Role assignment Discord HTTP error:",
+            repr(e)
         )
 
     except Exception as e:
@@ -2535,6 +2881,14 @@ if __name__ == "__main__":
     print(
         "Database:",
         DATABASE_FILE
+    )
+
+    print(
+        "Discord ticket protection: ENABLED"
+    )
+
+    print(
+        "Discord API rate-limit protection: ENABLED"
     )
 
     print(
