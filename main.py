@@ -28,20 +28,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 REDIRECT_URI = f"{PUBLIC_BASE_URL}/callback"
 
 TICKET_CATEGORY_ID = 1552294553413746769
 
-DATABASE_FILE = os.getenv(
-    "DATABASE_FILE",
-    "verification.db"
-)
+DATABASE_FILE = os.getenv("DATABASE_FILE", "verification.db")
 
-
-# ============================================================
-# ROLE IDs
-# ============================================================
 
 ROLE_MAP = {
     "50K_SUBS": 1552213495909711933,
@@ -57,35 +50,23 @@ ROLE_MAP = {
 
 
 # ============================================================
-# BASIC VALIDATION
+# VALIDATION
 # ============================================================
 
-def validate_configuration():
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is missing.")
 
-    missing = []
+if not GOOGLE_CLIENT_ID:
+    raise RuntimeError("GOOGLE_CLIENT_ID is missing.")
 
-    if not BOT_TOKEN:
-        missing.append("BOT_TOKEN")
+if not GOOGLE_CLIENT_SECRET:
+    raise RuntimeError("GOOGLE_CLIENT_SECRET is missing.")
 
-    if not GOOGLE_CLIENT_ID:
-        missing.append("GOOGLE_CLIENT_ID")
+if not PUBLIC_BASE_URL:
+    raise RuntimeError("PUBLIC_BASE_URL is missing.")
 
-    if not GOOGLE_CLIENT_SECRET:
-        missing.append("GOOGLE_CLIENT_SECRET")
-
-    if not PUBLIC_BASE_URL:
-        missing.append("PUBLIC_BASE_URL")
-
-    if missing:
-        raise RuntimeError(
-            "Missing environment variables: "
-            + ", ".join(missing)
-        )
-
-    if not PUBLIC_BASE_URL.startswith("https://"):
-        raise RuntimeError(
-            "PUBLIC_BASE_URL must start with https://"
-        )
+if not PUBLIC_BASE_URL.startswith("https://"):
+    raise RuntimeError("PUBLIC_BASE_URL must start with https://")
 
 
 # ============================================================
@@ -93,39 +74,27 @@ def validate_configuration():
 # ============================================================
 
 def get_connection():
-
     conn = sqlite3.connect(
         DATABASE_FILE,
-        timeout=30
+        timeout=30,
+        check_same_thread=False
     )
 
-    conn.execute(
-        "PRAGMA foreign_keys = ON"
-    )
-
-    # Safer SQLite behavior when more than one operation
-    # touches the database at nearly the same time.
-    conn.execute(
-        "PRAGMA journal_mode = WAL"
-    )
-
-    conn.execute(
-        "PRAGMA busy_timeout = 30000"
-    )
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
 
     return conn
 
 
 def init_database():
-
     conn = get_connection()
 
     try:
-
         cursor = conn.cursor()
 
         # ----------------------------------------------------
-        # GOOGLE ACCOUNTS
+        # Google accounts
         # ----------------------------------------------------
 
         cursor.execute("""
@@ -133,49 +102,46 @@ def init_database():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 discord_user_id TEXT NOT NULL,
                 google_sub TEXT NOT NULL UNIQUE,
-                google_email TEXT NOT NULL,
+                google_email TEXT,
                 verified_at TEXT NOT NULL
             )
         """)
 
         # ----------------------------------------------------
-        # VERIFIED YOUTUBE CHANNELS
+        # Verified YouTube channels
         # ----------------------------------------------------
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS verified_channels (
                 channel_id TEXT PRIMARY KEY,
                 discord_user_id TEXT NOT NULL,
-                channel_title TEXT NOT NULL,
-                subscriber_count INTEGER NOT NULL,
-                view_count INTEGER NOT NULL,
+                channel_title TEXT,
+                subscriber_count INTEGER NOT NULL DEFAULT 0,
+                view_count INTEGER NOT NULL DEFAULT 0,
                 verified_at TEXT NOT NULL
             )
         """)
 
         # ----------------------------------------------------
-        # OLD TABLE
+        # Legacy table
         # ----------------------------------------------------
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS verifications (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                discord_user_id TEXT NOT NULL UNIQUE,
-                google_sub TEXT NOT NULL UNIQUE,
-                google_email TEXT NOT NULL,
-                total_subscribers INTEGER NOT NULL,
-                total_views INTEGER NOT NULL,
-                verified_at TEXT NOT NULL
+                discord_user_id TEXT,
+                google_sub TEXT,
+                google_email TEXT,
+                channel_id TEXT,
+                channel_title TEXT,
+                subscriber_count INTEGER,
+                view_count INTEGER,
+                verified_at TEXT
             )
         """)
 
         # ----------------------------------------------------
-        # ACTIVE TICKETS
-        #
-        # discord_user_id is PRIMARY KEY.
-        #
-        # Therefore SQLite physically cannot store two active
-        # ticket reservations for the same Discord user.
+        # Active Discord tickets
         # ----------------------------------------------------
 
         cursor.execute("""
@@ -188,66 +154,107 @@ def init_database():
         """)
 
         # ----------------------------------------------------
-        # COPY OLD VERIFICATION DATA
+        # Persistent OAuth states
+        #
+        # IMPORTANT:
+        # This used to exist only in Python memory.
+        # It now lives in SQLite.
         # ----------------------------------------------------
 
         cursor.execute("""
-            INSERT OR IGNORE INTO google_accounts (
-                discord_user_id,
-                google_sub,
-                google_email,
-                verified_at
+            CREATE TABLE IF NOT EXISTS oauth_states (
+                state TEXT PRIMARY KEY,
+                discord_user_id TEXT NOT NULL,
+                guild_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                created_at REAL NOT NULL
             )
+        """)
+
+        # ----------------------------------------------------
+        # Migrate old verification records if present
+        # ----------------------------------------------------
+
+        cursor.execute("""
             SELECT
                 discord_user_id,
                 google_sub,
                 google_email,
                 verified_at
             FROM verifications
+            WHERE google_sub IS NOT NULL
         """)
+
+        old_rows = cursor.fetchall()
+
+        for row in old_rows:
+            discord_user_id, google_sub, google_email, verified_at = row
+
+            if not discord_user_id or not google_sub:
+                continue
+
+            cursor.execute("""
+                INSERT OR IGNORE INTO google_accounts (
+                    discord_user_id,
+                    google_sub,
+                    google_email,
+                    verified_at
+                )
+                VALUES (?, ?, ?, ?)
+            """, (
+                str(discord_user_id),
+                str(google_sub),
+                google_email,
+                verified_at or datetime.now(timezone.utc).isoformat()
+            ))
 
         conn.commit()
 
     finally:
-
         conn.close()
 
 
+init_database()
+
+
 # ============================================================
-# GOOGLE ACCOUNT DATABASE FUNCTIONS
+# GOOGLE DATABASE HELPERS
 # ============================================================
 
 def get_google_account_by_sub(google_sub):
-
     conn = get_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT *
+            SELECT
+                id,
+                discord_user_id,
+                google_sub,
+                google_email,
+                verified_at
             FROM google_accounts
             WHERE google_sub = ?
-        """, (google_sub,))
+        """, (str(google_sub),))
 
         return cursor.fetchone()
 
     finally:
-
         conn.close()
 
 
 def get_accounts_for_discord(discord_user_id):
-
     conn = get_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT *
+            SELECT
+                google_sub,
+                google_email,
+                verified_at
             FROM google_accounts
             WHERE discord_user_id = ?
         """, (str(discord_user_id),))
@@ -255,37 +262,37 @@ def get_accounts_for_discord(discord_user_id):
         return cursor.fetchall()
 
     finally:
-
         conn.close()
 
 
 def get_verified_channel(channel_id):
-
     conn = get_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT *
+            SELECT
+                channel_id,
+                discord_user_id,
+                channel_title,
+                subscriber_count,
+                view_count,
+                verified_at
             FROM verified_channels
             WHERE channel_id = ?
-        """, (channel_id,))
+        """, (str(channel_id),))
 
         return cursor.fetchone()
 
     finally:
-
         conn.close()
 
 
 def get_aggregate_totals(discord_user_id):
-
     conn = get_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -298,13 +305,9 @@ def get_aggregate_totals(discord_user_id):
 
         row = cursor.fetchone()
 
-        return (
-            int(row[0] or 0),
-            int(row[1] or 0)
-        )
+        return int(row[0]), int(row[1])
 
     finally:
-
         conn.close()
 
 
@@ -314,16 +317,12 @@ def save_google_account_and_channels(
     google_email,
     channels
 ):
-
     conn = get_connection()
 
     try:
-
         cursor = conn.cursor()
 
-        verified_at = datetime.now(
-            timezone.utc
-        ).isoformat()
+        verified_at = datetime.now(timezone.utc).isoformat()
 
         cursor.execute("""
             INSERT INTO google_accounts (
@@ -335,13 +334,12 @@ def save_google_account_and_channels(
             VALUES (?, ?, ?, ?)
         """, (
             str(discord_user_id),
-            google_sub,
+            str(google_sub),
             google_email,
             verified_at
         ))
 
         for channel in channels:
-
             cursor.execute("""
                 INSERT INTO verified_channels (
                     channel_id,
@@ -353,36 +351,32 @@ def save_google_account_and_channels(
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (
-                channel["id"],
+                str(channel["id"]),
                 str(discord_user_id),
                 channel["title"],
-                channel["subscribers"],
-                channel["views"],
+                int(channel["subscriber_count"]),
+                int(channel["view_count"]),
                 verified_at
             ))
 
         conn.commit()
 
     except Exception:
-
         conn.rollback()
         raise
 
     finally:
-
         conn.close()
 
 
 # ============================================================
-# ACTIVE TICKET DATABASE FUNCTIONS
+# TICKET DATABASE HELPERS
 # ============================================================
 
 def get_active_ticket(discord_user_id):
-
     conn = get_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -398,42 +392,30 @@ def get_active_ticket(discord_user_id):
         return cursor.fetchone()
 
     finally:
-
         conn.close()
 
 
-def reserve_ticket_slot(
-    discord_user_id,
-    guild_id
-):
+def reserve_ticket_slot(discord_user_id, guild_id):
     """
-    Atomically reserves the member's one allowed ticket.
+    Atomically reserve a ticket slot.
 
-    The reservation happens BEFORE Discord channel creation.
-
-    The reservation is deliberately kept if Discord temporarily
-    fails. This prevents an API failure from allowing a second
-    ticket to be created.
+    This prevents two simultaneous clicks from creating
+    two tickets for the same Discord account.
     """
+
+    token = secrets.token_urlsafe(16)
+    pending_channel_id = f"pending-{token}"
+    created_at = datetime.now(timezone.utc).isoformat()
 
     conn = get_connection()
 
     try:
-
         cursor = conn.cursor()
 
-        # Force SQLite to obtain the write lock before checking
-        # and inserting.
-        cursor.execute(
-            "BEGIN IMMEDIATE"
-        )
+        cursor.execute("BEGIN IMMEDIATE")
 
         cursor.execute("""
-            SELECT
-                discord_user_id,
-                guild_id,
-                channel_id,
-                created_at
+            SELECT channel_id
             FROM active_tickets
             WHERE discord_user_id = ?
         """, (str(discord_user_id),))
@@ -441,22 +423,8 @@ def reserve_ticket_slot(
         existing = cursor.fetchone()
 
         if existing:
-
             conn.rollback()
-
-            return {
-                "reserved": False,
-                "existing": existing
-            }
-
-        pending_channel_id = (
-            "pending-"
-            + secrets.token_urlsafe(16)
-        )
-
-        created_at = datetime.now(
-            timezone.utc
-        ).isoformat()
+            return False, existing[0]
 
         cursor.execute("""
             INSERT INTO active_tickets (
@@ -475,42 +443,20 @@ def reserve_ticket_slot(
 
         conn.commit()
 
-        return {
-            "reserved": True,
-            "existing": None,
-            "channel_id": pending_channel_id
-        }
-
-    except sqlite3.IntegrityError:
-
-        conn.rollback()
-
-        return {
-            "reserved": False,
-            "existing": get_active_ticket(
-                discord_user_id
-            )
-        }
+        return True, pending_channel_id
 
     except Exception:
-
         conn.rollback()
         raise
 
     finally:
-
         conn.close()
 
 
-def set_active_ticket_channel(
-    discord_user_id,
-    channel_id
-):
-
+def set_active_ticket_channel(discord_user_id, channel_id):
     conn = get_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -525,858 +471,218 @@ def set_active_ticket_channel(
         conn.commit()
 
     finally:
-
         conn.close()
 
 
 def delete_active_ticket(discord_user_id):
-
     conn = get_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute("""
             DELETE FROM active_tickets
             WHERE discord_user_id = ?
-        """, (
-            str(discord_user_id),
-        ))
+        """, (str(discord_user_id),))
 
         conn.commit()
 
     finally:
-
         conn.close()
 
 
 def delete_active_ticket_by_channel(channel_id):
-
     conn = get_connection()
 
     try:
-
         cursor = conn.cursor()
 
         cursor.execute("""
             DELETE FROM active_tickets
             WHERE channel_id = ?
-        """, (
-            str(channel_id),
-        ))
+        """, (str(channel_id),))
 
         conn.commit()
 
     finally:
-
         conn.close()
 
 
 # ============================================================
-# OAUTH STATE
+# PERSISTENT OAUTH STATE
 # ============================================================
 
-oauth_states = {}
-
-verification_creation_locks = {}
+OAUTH_STATE_LIFETIME = 600
 
 
 def cleanup_expired_oauth_states():
+    cutoff = (
+        datetime.now(timezone.utc).timestamp()
+        - OAUTH_STATE_LIFETIME
+    )
 
-    now = datetime.now(
-        timezone.utc
-    ).timestamp()
+    conn = get_connection()
 
-    expired = []
+    try:
+        conn.execute("""
+            DELETE FROM oauth_states
+            WHERE created_at < ?
+        """, (cutoff,))
 
-    for state, data in oauth_states.items():
+        conn.commit()
 
-        if now - data["created_at"] > 600:
+    finally:
+        conn.close()
 
-            expired.append(state)
-
-    for state in expired:
-
-        oauth_states.pop(
-            state,
-            None
-        )
-
-
-# ============================================================
-# VERIFICATION / OAUTH HELPERS
-# ============================================================
 
 def create_oauth_state(
     discord_user_id,
     guild_id,
     channel_id
 ):
-
     cleanup_expired_oauth_states()
 
     state = secrets.token_urlsafe(32)
 
-    oauth_states[state] = {
-        "discord_user_id": discord_user_id,
-        "guild_id": guild_id,
-        "channel_id": channel_id,
-        "created_at":
-            datetime.now(
-                timezone.utc
-            ).timestamp()
-    }
+    created_at = datetime.now(
+        timezone.utc
+    ).timestamp()
 
-    return state
+    conn = get_connection()
+
+    try:
+        conn.execute("""
+            INSERT INTO oauth_states (
+                state,
+                discord_user_id,
+                guild_id,
+                channel_id,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            state,
+            str(discord_user_id),
+            str(guild_id),
+            str(channel_id),
+            created_at
+        ))
+
+        conn.commit()
+
+        return state
+
+    finally:
+        conn.close()
+
+
+def get_oauth_state(state):
+    cleanup_expired_oauth_states()
+
+    conn = get_connection()
+
+    try:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                state,
+                discord_user_id,
+                guild_id,
+                channel_id,
+                created_at
+            FROM oauth_states
+            WHERE state = ?
+        """, (state,))
+
+        row = cursor.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "state": row[0],
+            "discord_user_id": row[1],
+            "guild_id": row[2],
+            "channel_id": row[3],
+            "created_at": float(row[4])
+        }
+
+    finally:
+        conn.close()
+
+
+def consume_oauth_state(state):
+    """
+    Atomically read and delete the OAuth state.
+
+    This prevents the same OAuth state from being used
+    successfully twice.
+    """
+
+    cleanup_expired_oauth_states()
+
+    conn = get_connection()
+
+    try:
+        cursor = conn.cursor()
+
+        cursor.execute("BEGIN IMMEDIATE")
+
+        cursor.execute("""
+            SELECT
+                state,
+                discord_user_id,
+                guild_id,
+                channel_id,
+                created_at
+            FROM oauth_states
+            WHERE state = ?
+        """, (state,))
+
+        row = cursor.fetchone()
+
+        if not row:
+            conn.rollback()
+            return None
+
+        cursor.execute("""
+            DELETE FROM oauth_states
+            WHERE state = ?
+        """, (state,))
+
+        conn.commit()
+
+        created_at = float(row[4])
+
+        if (
+            datetime.now(timezone.utc).timestamp()
+            - created_at
+            > OAUTH_STATE_LIFETIME
+        ):
+            return None
+
+        return {
+            "state": row[0],
+            "discord_user_id": row[1],
+            "guild_id": row[2],
+            "channel_id": row[3],
+            "created_at": created_at
+        }
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
 
 
 def get_login_url(state):
-
     return (
         f"{PUBLIC_BASE_URL}/login?"
-        + urlencode({
-            "state": state
-        })
+        + urlencode({"state": state})
     )
-
-
-# ============================================================
-# DISCORD TICKET CONTROLS
-# ============================================================
-
-class ConnectYouTubeButton(Button):
-
-    def __init__(self, login_url):
-
-        super().__init__(
-            label="Connect YouTube",
-            style=discord.ButtonStyle.link,
-            url=login_url
-        )
-
-
-class ConnectYouTubeView(View):
-
-    def __init__(self, login_url):
-
-        super().__init__(
-            timeout=None
-        )
-
-        self.add_item(
-            ConnectYouTubeButton(
-                login_url
-            )
-        )
-
-
-class CloseTicketButton(Button):
-
-    def __init__(self):
-
-        super().__init__(
-            label="Close Ticket",
-            style=discord.ButtonStyle.danger,
-            custom_id="close_verification_ticket"
-        )
-
-    async def callback(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        user = interaction.user
-        channel = interaction.channel
-
-        if channel is None:
-
-            await interaction.response.send_message(
-                "❌ This button can only be used inside a verification ticket.",
-                ephemeral=True
-            )
-
-            return
-
-        active_ticket = get_active_ticket(
-            user.id
-        )
-
-        if not active_ticket:
-
-            await interaction.response.send_message(
-                "❌ This is no longer an active verification ticket.",
-                ephemeral=True
-            )
-
-            return
-
-        active_channel_id = str(
-            active_ticket[2]
-        )
-
-        if (
-            active_channel_id.startswith("pending-")
-            or str(channel.id) != active_channel_id
-        ):
-
-            await interaction.response.send_message(
-                "❌ This is not your active verification ticket.",
-                ephemeral=True
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # OWNER PROTECTION
-        # ----------------------------------------------------
-
-        try:
-
-            if await bot.is_owner(user):
-
-                await interaction.response.send_message(
-                    "🛡️ The bot owner cannot be removed from the verification ticket.",
-                    ephemeral=True
-                )
-
-                return
-
-        except Exception as e:
-
-            print(
-                "Owner check error:",
-                repr(e)
-            )
-
-        # ----------------------------------------------------
-        # ACKNOWLEDGE FIRST
-        # ----------------------------------------------------
-
-        try:
-
-            await interaction.response.defer(
-                ephemeral=True
-            )
-
-        except Exception as e:
-
-            print(
-                "Close-ticket interaction defer error:",
-                repr(e)
-            )
-
-            return
-
-        # ----------------------------------------------------
-        # CLOSE TICKET
-        # ----------------------------------------------------
-
-        try:
-
-            await channel.set_permissions(
-                user,
-                view_channel=False,
-                send_messages=False,
-                read_message_history=False
-            )
-
-            delete_active_ticket(
-                user.id
-            )
-
-            await interaction.followup.send(
-                "✅ Your verification ticket has been closed.",
-                ephemeral=True
-            )
-
-        except discord.Forbidden:
-
-            await interaction.followup.send(
-                "❌ I don't have permission to close this ticket.",
-                ephemeral=True
-            )
-
-        except discord.HTTPException as e:
-
-            print(
-                "Close-ticket Discord HTTP error:",
-                repr(e)
-            )
-
-            await interaction.followup.send(
-                "❌ Discord temporarily rejected the ticket-close request. Please try again.",
-                ephemeral=True
-            )
-
-        except Exception as e:
-
-            print(
-                "Close ticket error:",
-                repr(e)
-            )
-
-            await interaction.followup.send(
-                "❌ Something went wrong while closing this ticket.",
-                ephemeral=True
-            )
-
-
-class CloseTicketView(View):
-
-    def __init__(self):
-
-        super().__init__(
-            timeout=None
-        )
-
-        self.add_item(
-            CloseTicketButton()
-        )
-
-
-async def send_verification_controls(
-    discord_user_id,
-    guild_id,
-    channel
-):
-
-    state = create_oauth_state(
-        discord_user_id,
-        guild_id,
-        channel.id
-    )
-
-    login_url = get_login_url(
-        state
-    )
-
-    # Connect YouTube message
-    await channel.send(
-
-        "🔗 **Connect YouTube**\n\n"
-        "Click the button below to connect a Google/YouTube "
-        "account. You can use this again later to add another "
-        "account.",
-
-        view=ConnectYouTubeView(
-            login_url
-        )
-    )
-
-    # Close ticket message
-    await channel.send(
-
-        "🎫 **Finished verifying?**\n\n"
-        "Press the button below to leave this verification ticket.",
-
-        view=CloseTicketView()
-    )
-
-
-# ============================================================
-# TICKET RECOVERY HELPERS
-# ============================================================
-
-def find_existing_ticket_channel(
-    guild,
-    channel_name,
-    category
-):
-    """
-    Searches Discord's currently cached guild channels for a
-    matching ticket.
-
-    This is used after an uncertain Discord API failure so the
-    bot can adopt an already-created channel instead of creating
-    another one.
-    """
-
-    for existing_channel in guild.text_channels:
-
-        if existing_channel.name != channel_name:
-            continue
-
-        if category is not None:
-
-            if existing_channel.category_id != category.id:
-                continue
-
-        return existing_channel
-
-    return None
-
-
-def build_ticket_channel_name(user):
-
-    username = re.sub(
-        r"[^a-zA-Z0-9_-]",
-        "-",
-        user.name
-    ).strip("-").lower()
-
-    if not username:
-
-        username = str(
-            user.id
-        )
-
-    return (
-        f"verify-{username}"
-    )[:100]
-
-
-# ============================================================
-# DISCORD VERIFICATION BUTTON
-# ============================================================
-
-class VerifyButton(Button):
-
-    def __init__(self):
-
-        super().__init__(
-            label="Verify Creator Milestones",
-            style=discord.ButtonStyle.primary,
-            custom_id="verify_btn"
-        )
-
-    async def callback(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        user = interaction.user
-        guild = interaction.guild
-
-        if guild is None:
-
-            await interaction.response.send_message(
-                "❌ This button can only be used inside the Discord server.",
-                ephemeral=True
-            )
-
-            return
-
-        cleanup_expired_oauth_states()
-
-        lock = verification_creation_locks.setdefault(
-            user.id,
-            asyncio.Lock()
-        )
-
-        async with lock:
-
-            # ------------------------------------------------
-            # DATABASE RESERVATION
-            # ------------------------------------------------
-
-            reservation = reserve_ticket_slot(
-                user.id,
-                guild.id
-            )
-
-            if not reservation["reserved"]:
-
-                existing = reservation["existing"]
-
-                if existing:
-
-                    existing_guild_id = str(
-                        existing[1]
-                    )
-
-                    existing_channel_id = str(
-                        existing[2]
-                    )
-
-                    # ----------------------------------------
-                    # A TICKET IS CURRENTLY BEING CREATED
-                    # ----------------------------------------
-
-                    if existing_channel_id.startswith(
-                        "pending-"
-                    ):
-
-                        await interaction.response.send_message(
-                            "❌ Your verification ticket is already being created. Please wait a moment.",
-                            ephemeral=True
-                        )
-
-                        return
-
-                    # ----------------------------------------
-                    # EXISTING CHANNEL
-                    # ----------------------------------------
-
-                    if existing_guild_id != str(guild.id):
-
-                        await interaction.response.send_message(
-                            "❌ You already have an active verification ticket.",
-                            ephemeral=True
-                        )
-
-                        return
-
-                    try:
-
-                        existing_channel = guild.get_channel(
-                            int(existing_channel_id)
-                        )
-
-                    except (ValueError, TypeError):
-
-                        existing_channel = None
-
-                    if existing_channel:
-
-                        await interaction.response.send_message(
-                            "❌ You already have an active "
-                            f"verification channel: {existing_channel.mention}",
-                            ephemeral=True
-                        )
-
-                    else:
-
-                        # IMPORTANT:
-                        #
-                        # Do NOT delete the reservation.
-                        #
-                        # Discord may temporarily fail to return
-                        # the channel because of cache/API state.
-                        #
-                        # Keeping the reservation guarantees that
-                        # another click cannot create a second one.
-                        await interaction.response.send_message(
-                            "❌ You already have an active verification ticket. "
-                            "Please wait or contact the server administrator if the ticket is not visible.",
-                            ephemeral=True
-                        )
-
-                    return
-
-                await interaction.response.send_message(
-                    "❌ You already have an active verification ticket.",
-                    ephemeral=True
-                )
-
-                return
-
-            # ------------------------------------------------
-            # ACKNOWLEDGE THE INTERACTION EARLY
-            #
-            # Discord interactions have a short initial response
-            # window. Deferring here prevents channel creation/API
-            # delays from causing an interaction timeout.
-            # ------------------------------------------------
-
-            try:
-
-                await interaction.response.defer(
-                    ephemeral=True
-                )
-
-            except Exception as e:
-
-                print(
-                    "Verification interaction defer error:",
-                    repr(e)
-                )
-
-                # IMPORTANT:
-                #
-                # The database reservation remains.
-                #
-                # We do NOT delete it here because another
-                # process/click must not be allowed to create
-                # a second ticket.
-                return
-
-            # ------------------------------------------------
-            # FIND CATEGORY
-            # ------------------------------------------------
-
-            category = guild.get_channel(
-                TICKET_CATEGORY_ID
-            )
-
-            if category is None:
-
-                # The category genuinely cannot be found.
-                # This is a configuration problem, not a rate
-                # limit problem.
-                delete_active_ticket(
-                    user.id
-                )
-
-                await interaction.followup.send(
-                    "❌ Verification category could not be found. "
-                    "The reservation was released because no ticket could be created.",
-                    ephemeral=True
-                )
-
-                return
-
-            # ------------------------------------------------
-            # CHANNEL NAME
-            # ------------------------------------------------
-
-            channel_name = build_ticket_channel_name(
-                user
-            )
-
-            # ------------------------------------------------
-            # SAFETY CHECK:
-            #
-            # If a channel already exists with the expected
-            # name/category, adopt it rather than creating
-            # another channel.
-            # ------------------------------------------------
-
-            existing_named_channel = find_existing_ticket_channel(
-                guild,
-                channel_name,
-                category
-            )
-
-            if existing_named_channel:
-
-                set_active_ticket_channel(
-                    user.id,
-                    existing_named_channel.id
-                )
-
-                try:
-
-                    await interaction.followup.send(
-                        "✅ Your private verification channel is ready: "
-                        f"{existing_named_channel.mention}",
-                        ephemeral=True
-                    )
-
-                except Exception as e:
-
-                    print(
-                        "Could not send existing-channel response:",
-                        repr(e)
-                    )
-
-                return
-
-            # ------------------------------------------------
-            # CREATE CHANNEL
-            # ------------------------------------------------
-
-            try:
-
-                channel = await guild.create_text_channel(
-
-                    channel_name,
-
-                    category=category,
-
-                    overwrites={
-
-                        guild.default_role:
-                            discord.PermissionOverwrite(
-                                view_channel=False
-                            ),
-
-                        user:
-                            discord.PermissionOverwrite(
-                                view_channel=True,
-                                send_messages=True,
-                                read_message_history=True
-                            ),
-
-                        guild.me:
-                            discord.PermissionOverwrite(
-                                view_channel=True,
-                                send_messages=True,
-                                read_message_history=True
-                            )
-                    }
-                )
-
-            except discord.Forbidden:
-
-                # Discord explicitly rejected the operation.
-                # No ticket should have been created.
-                delete_active_ticket(
-                    user.id
-                )
-
-                await interaction.followup.send(
-                    "❌ I don't have permission to create verification channels. "
-                    "The ticket reservation was released.",
-                    ephemeral=True
-                )
-
-                return
-
-            except discord.HTTPException as e:
-
-                print(
-                    "Channel creation HTTP error:",
-                    repr(e)
-                )
-
-                # ------------------------------------------------
-                # DO NOT DELETE THE RESERVATION.
-                #
-                # A 429 or other HTTP failure can leave uncertainty
-                # about whether Discord actually created the
-                # channel. Releasing the reservation here could
-                # allow a second ticket.
-                # ------------------------------------------------
-
-                possible_channel = find_existing_ticket_channel(
-                    guild,
-                    channel_name,
-                    category
-                )
-
-                if possible_channel:
-
-                    set_active_ticket_channel(
-                        user.id,
-                        possible_channel.id
-                    )
-
-                    await interaction.followup.send(
-                        "✅ Your verification channel was created. "
-                        f"You can use it here: {possible_channel.mention}",
-                        ephemeral=True
-                    )
-
-                    return
-
-                if getattr(e, "status", None) == 429:
-
-                    await interaction.followup.send(
-                        "⚠️ Discord temporarily rate-limited the bot. "
-                        "Your ticket reservation is protected, so a second ticket cannot be created. "
-                        "Please wait a moment and try again.",
-                        ephemeral=True
-                    )
-
-                else:
-
-                    await interaction.followup.send(
-                        "⚠️ Discord temporarily rejected the ticket creation request. "
-                        "Your ticket reservation is protected, so a second ticket cannot be created. "
-                        "Please wait a moment and try again.",
-                        ephemeral=True
-                    )
-
-                return
-
-            except Exception as e:
-
-                print(
-                    "Channel creation unexpected error:",
-                    repr(e)
-                )
-
-                # Keep the reservation because the actual Discord
-                # result is uncertain.
-                possible_channel = find_existing_ticket_channel(
-                    guild,
-                    channel_name,
-                    category
-                )
-
-                if possible_channel:
-
-                    set_active_ticket_channel(
-                        user.id,
-                        possible_channel.id
-                    )
-
-                    await interaction.followup.send(
-                        "✅ Your verification channel is ready: "
-                        f"{possible_channel.mention}",
-                        ephemeral=True
-                    )
-
-                    return
-
-                await interaction.followup.send(
-                    "⚠️ The ticket creation request could not be confirmed. "
-                    "Your ticket reservation is protected so another ticket cannot be created. "
-                    "Please wait a moment and try again.",
-                    ephemeral=True
-                )
-
-                return
-
-            # ------------------------------------------------
-            # SAVE ACTUAL DISCORD CHANNEL ID
-            # ------------------------------------------------
-
-            set_active_ticket_channel(
-                user.id,
-                channel.id
-            )
-
-            # ------------------------------------------------
-            # SEND TICKET CONTROLS
-            # ------------------------------------------------
-
-            try:
-
-                await send_verification_controls(
-                    user.id,
-                    guild.id,
-                    channel
-                )
-
-            except discord.HTTPException as e:
-
-                print(
-                    "Could not send verification controls:",
-                    repr(e)
-                )
-
-            except Exception as e:
-
-                print(
-                    "Could not send verification controls:",
-                    repr(e)
-                )
-
-            # ------------------------------------------------
-            # SUCCESS
-            # ------------------------------------------------
-
-            try:
-
-                await interaction.followup.send(
-
-                    "✅ Your private verification channel is ready: "
-                    f"{channel.mention}",
-
-                    ephemeral=True
-                )
-
-            except Exception as e:
-
-                print(
-                    "Could not send ticket success response:",
-                    repr(e)
-                )
-
-
-class VerifyView(View):
-
-    def __init__(self):
-
-        super().__init__(
-            timeout=None
-        )
-
-        self.add_item(
-            VerifyButton()
-        )
 
 
 # ============================================================
@@ -1384,101 +690,514 @@ class VerifyView(View):
 # ============================================================
 
 intents = discord.Intents.default()
-
+intents.guilds = True
 intents.members = True
 intents.message_content = True
 
 
-class VerificationBot(commands.Bot):
-
-    async def setup_hook(self):
-
-        # Persistent verification button.
-        self.add_view(
-            VerifyView()
-        )
-
-        # Persistent close-ticket button.
-        self.add_view(
-            CloseTicketView()
-        )
-
-
-bot = VerificationBot(
+bot = commands.Bot(
     command_prefix="$",
     intents=intents
 )
 
 
-@bot.event
-async def on_ready():
-
-    print(
-        "===================================="
-    )
-
-    print(
-        f"Logged in as: {bot.user} "
-        f"(ID: {bot.user.id})"
-    )
-
-    print(
-        f"Connected to {len(bot.guilds)} Discord server(s)."
-    )
-
-    print(
-        "Discord bot gateway connection is ACTIVE."
-    )
-
-    print(
-        "===================================="
-    )
+verification_creation_locks = {}
 
 
 # ============================================================
-# CLEAN UP TICKET IF CHANNEL IS ACTUALLY DELETED
+# DISCORD EMBED
 # ============================================================
 
-@bot.event
-async def on_guild_channel_delete(channel):
-
-    try:
-
-        delete_active_ticket_by_channel(
-            channel.id
-        )
-
-        print(
-            f"Ticket database cleanup checked channel {channel.id}"
-        )
-
-    except Exception as e:
-
-        print(
-            "Ticket database cleanup error:",
-            repr(e)
-        )
-
-
-# ============================================================
-# $roles COMMAND
-# ============================================================
-
-@bot.command(name="roles")
-@commands.is_owner()
-async def setup_roles(ctx):
-
-    embed = discord.Embed(
-
+def build_verification_embed():
+    return discord.Embed(
         title="🎥 Creator Milestone Verification",
-
         description=(
             "Connect your YouTube account to verify your "
             "subscriber and view milestones."
         ),
-
         color=discord.Color.red()
     )
+
+
+# ============================================================
+# GOOGLE CONNECTION BUTTON
+# ============================================================
+
+class ContinueToGoogleButton(Button):
+
+    def __init__(self, login_url):
+        super().__init__(
+            label="Continue to Google",
+            style=discord.ButtonStyle.link,
+            url=login_url
+        )
+
+
+class ContinueToGoogleView(View):
+
+    def __init__(self, login_url):
+        super().__init__(timeout=None)
+
+        self.add_item(
+            ContinueToGoogleButton(login_url)
+        )
+
+
+class ConnectYouTubeButton(Button):
+
+    def __init__(self):
+        super().__init__(
+            label="Connect YouTube",
+            style=discord.ButtonStyle.primary,
+            emoji="▶️",
+            custom_id="connect_youtube_live"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+
+        user = interaction.user
+        guild = interaction.guild
+        channel = interaction.channel
+
+        if guild is None or channel is None:
+            await interaction.response.send_message(
+                "❌ This button can only be used inside the server.",
+                ephemeral=True
+            )
+            return
+
+        active_ticket = get_active_ticket(user.id)
+
+        if not active_ticket:
+            await interaction.response.send_message(
+                "❌ You do not have an active verification ticket.",
+                ephemeral=True
+            )
+            return
+
+        active_guild_id = str(active_ticket[1])
+        active_channel_id = str(active_ticket[2])
+
+        if active_guild_id != str(guild.id):
+            await interaction.response.send_message(
+                "❌ This verification ticket belongs to another server.",
+                ephemeral=True
+            )
+            return
+
+        if active_channel_id != str(channel.id):
+            await interaction.response.send_message(
+                "❌ This is not your active verification ticket.",
+                ephemeral=True
+            )
+            return
+
+        # Create a brand-new state at the exact moment
+        # the user clicks Connect YouTube.
+        state = create_oauth_state(
+            discord_user_id=user.id,
+            guild_id=guild.id,
+            channel_id=channel.id
+        )
+
+        login_url = get_login_url(state)
+
+        await interaction.response.send_message(
+            "🔐 Your secure YouTube connection link is ready.\n\n"
+            "Click **Continue to Google** below.",
+            view=ContinueToGoogleView(login_url),
+            ephemeral=True
+        )
+
+
+class ConnectYouTubeView(View):
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+        self.add_item(
+            ConnectYouTubeButton()
+        )
+
+
+# ============================================================
+# CLOSE TICKET
+# ============================================================
+
+class CloseTicketButton(Button):
+
+    def __init__(self):
+        super().__init__(
+            label="Close Ticket",
+            style=discord.ButtonStyle.danger,
+            emoji="🔒",
+            custom_id="close_verification_ticket"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+
+        user = interaction.user
+        channel = interaction.channel
+
+        if channel is None:
+            return
+
+        active_ticket = get_active_ticket(user.id)
+
+        if not active_ticket:
+            await interaction.response.send_message(
+                "❌ You do not have an active verification ticket.",
+                ephemeral=True
+            )
+            return
+
+        active_channel_id = str(active_ticket[2])
+
+        if active_channel_id != str(channel.id):
+            await interaction.response.send_message(
+                "❌ This is not your active verification ticket.",
+                ephemeral=True
+            )
+            return
+
+        # NEVER remove the bot owner from the ticket.
+        if await bot.is_owner(user):
+            await interaction.response.send_message(
+                "👑 The bot owner cannot be removed from this ticket.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(
+            ephemeral=True
+        )
+
+        try:
+            await channel.set_permissions(
+                user,
+                view_channel=False,
+                send_messages=False,
+                read_message_history=False
+            )
+
+            delete_active_ticket(user.id)
+
+            await interaction.followup.send(
+                "🔒 Your verification ticket has been closed.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            print(
+                "Error closing ticket:",
+                repr(e)
+            )
+
+            await interaction.followup.send(
+                "❌ I couldn't close the ticket.",
+                ephemeral=True
+            )
+
+
+class CloseTicketView(View):
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+        self.add_item(
+            CloseTicketButton()
+        )
+
+
+# ============================================================
+# VERIFICATION BUTTON
+# ============================================================
+
+class VerifyButton(Button):
+
+    def __init__(self):
+        super().__init__(
+            label="Verify Creator Milestones",
+            style=discord.ButtonStyle.primary,
+            emoji="🎥",
+            custom_id="verify_creator_milestones"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+
+        user = interaction.user
+        guild = interaction.guild
+
+        if guild is None:
+            await interaction.response.send_message(
+                "❌ This button can only be used inside a server.",
+                ephemeral=True
+            )
+            return
+
+        # ----------------------------------------------------
+        # Check if user already has an active ticket.
+        # ----------------------------------------------------
+
+        existing_ticket = get_active_ticket(user.id)
+
+        if existing_ticket:
+            existing_channel_id = existing_ticket[2]
+
+            existing_channel = guild.get_channel(
+                int(existing_channel_id)
+            )
+
+            if existing_channel:
+                await interaction.response.send_message(
+                    f"❌ You already have an active verification ticket: "
+                    f"{existing_channel.mention}",
+                    ephemeral=True
+                )
+                return
+
+            # Stale database entry.
+            delete_active_ticket(user.id)
+
+        # ----------------------------------------------------
+        # Reserve ticket slot BEFORE creating channel.
+        # ----------------------------------------------------
+
+        reserved, reservation_value = reserve_ticket_slot(
+            user.id,
+            guild.id
+        )
+
+        if not reserved:
+
+            existing_channel = guild.get_channel(
+                int(reservation_value)
+            ) if str(reservation_value).isdigit() else None
+
+            if existing_channel:
+                await interaction.response.send_message(
+                    f"❌ You already have an active verification ticket: "
+                    f"{existing_channel.mention}",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    "❌ You already have a verification ticket being created.",
+                    ephemeral=True
+                )
+
+            return
+
+        await interaction.response.defer(
+            ephemeral=True
+        )
+
+        category = guild.get_channel(
+            TICKET_CATEGORY_ID
+        )
+
+        if not isinstance(category, discord.CategoryChannel):
+
+            delete_active_ticket(user.id)
+
+            await interaction.followup.send(
+                "❌ The verification ticket category could not be found.",
+                ephemeral=True
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # Channel name
+        # ----------------------------------------------------
+
+        safe_name = re.sub(
+            r"[^a-zA-Z0-9-]",
+            "-",
+            user.name.lower()
+        ).strip("-")
+
+        if not safe_name:
+            safe_name = "user"
+
+        channel_name = f"verify-{safe_name}"
+
+        # ----------------------------------------------------
+        # Permissions
+        # ----------------------------------------------------
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=False
+            ),
+            user: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
+        }
+
+        if guild.me:
+            overwrites[guild.me] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                manage_channels=True,
+                manage_permissions=True
+            )
+
+        # ----------------------------------------------------
+        # Create channel
+        # ----------------------------------------------------
+
+        try:
+
+            channel = await guild.create_text_channel(
+                channel_name,
+                category=category,
+                overwrites=overwrites,
+                reason="Creator milestone verification ticket"
+            )
+
+        except Exception as e:
+
+            print(
+                "Ticket channel creation failed:",
+                repr(e)
+            )
+
+            delete_active_ticket(user.id)
+
+            await interaction.followup.send(
+                "❌ I couldn't create your verification ticket.",
+                ephemeral=True
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # Save actual channel ID
+        # ----------------------------------------------------
+
+        set_active_ticket_channel(
+            user.id,
+            channel.id
+        )
+
+        # ----------------------------------------------------
+        # Send controls
+        # ----------------------------------------------------
+
+        try:
+
+            await channel.send(
+                content=f"{user.mention}",
+                embed=build_verification_embed(),
+                view=ConnectYouTubeView()
+            )
+
+            await channel.send(
+                "When you're finished with verification, "
+                "you can close this ticket below.",
+                view=CloseTicketView()
+            )
+
+        except Exception as e:
+
+            print(
+                "Failed sending ticket controls:",
+                repr(e)
+            )
+
+        await interaction.followup.send(
+            f"✅ Your verification ticket is ready: "
+            f"{channel.mention}",
+            ephemeral=True
+        )
+
+
+class VerifyView(View):
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+        self.add_item(
+            VerifyButton()
+        )
+
+
+# ============================================================
+# SEND VERIFICATION CONTROLS
+# ============================================================
+
+async def send_verification_controls(channel, user):
+
+    await channel.send(
+        content=f"{user.mention}",
+        embed=build_verification_embed(),
+        view=ConnectYouTubeView()
+    )
+
+    await channel.send(
+        "You can connect another YouTube account above, "
+        "or close this ticket when finished.",
+        view=CloseTicketView()
+    )
+
+
+# ============================================================
+# BOT READY
+# ============================================================
+
+@bot.event
+async def on_ready():
+
+    print(
+        f"Logged in as {bot.user} "
+        f"(ID: {bot.user.id})"
+    )
+
+    print(
+        f"Public base URL: {PUBLIC_BASE_URL}"
+    )
+
+    print(
+        f"OAuth redirect URI: {REDIRECT_URI}"
+    )
+
+
+# ============================================================
+# BOT SETUP
+# ============================================================
+
+@bot.event
+async def setup_hook():
+
+    # Register persistent buttons so buttons from
+    # messages created before a restart continue working.
+
+    bot.add_view(
+        VerifyView()
+    )
+
+    bot.add_view(
+        ConnectYouTubeView()
+    )
+
+    bot.add_view(
+        CloseTicketView()
+    )
+
+
+# ============================================================
+# $roles
+# ============================================================
+
+@bot.command(name="roles")
+@commands.is_owner()
+async def roles_command(ctx):
+
+    embed = build_verification_embed()
 
     await ctx.send(
         embed=embed,
@@ -1486,28 +1205,241 @@ async def setup_roles(ctx):
     )
 
 
-@setup_roles.error
-async def setup_roles_error(
-    ctx,
-    error
-):
+@roles_command.error
+async def roles_command_error(ctx, error):
 
     if isinstance(
         error,
         commands.NotOwner
     ):
-
         await ctx.send(
-            "❌ Only the bot owner can use this command.",
-            delete_after=5
+            "❌ Only the bot owner can use this command."
         )
 
+
+# ============================================================
+# GOOGLE OAUTH HELPERS
+# ============================================================
+
+GOOGLE_AUTH_URL = (
+    "https://accounts.google.com/o/oauth2/v2/auth"
+)
+
+GOOGLE_TOKEN_URL = (
+    "https://oauth2.googleapis.com/token"
+)
+
+GOOGLE_USERINFO_URL = (
+    "https://openidconnect.googleapis.com/v1/userinfo"
+)
+
+YOUTUBE_API_URL = (
+    "https://www.googleapis.com/youtube/v3"
+)
+
+
+def exchange_code_for_token(code):
+
+    response = requests.post(
+        GOOGLE_TOKEN_URL,
+        data={
+            "code": code,
+            "client_id": GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri": REDIRECT_URI,
+            "grant_type": "authorization_code"
+        },
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+def get_google_user(access_token):
+
+    response = requests.get(
+        GOOGLE_USERINFO_URL,
+        headers={
+            "Authorization": f"Bearer {access_token}"
+        },
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+def get_all_youtube_channels(access_token):
+
+    channels = []
+
+    page_token = None
+
+    while True:
+
+        params = {
+            "part": "snippet,statistics",
+            "mine": "true",
+            "maxResults": 50
+        }
+
+        if page_token:
+            params["pageToken"] = page_token
+
+        response = requests.get(
+            f"{YOUTUBE_API_URL}/channels",
+            headers={
+                "Authorization": f"Bearer {access_token}"
+            },
+            params=params,
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        for item in data.get("items", []):
+
+            statistics = item.get(
+                "statistics",
+                {}
+            )
+
+            channels.append({
+                "id": item["id"],
+                "title": item["snippet"]["title"],
+                "subscriber_count": int(
+                    statistics.get(
+                        "subscriberCount",
+                        0
+                    )
+                ),
+                "view_count": int(
+                    statistics.get(
+                        "viewCount",
+                        0
+                    )
+                )
+            })
+
+        page_token = data.get(
+            "nextPageToken"
+        )
+
+        if not page_token:
+            break
+
+    return channels
+
+
+# ============================================================
+# ROLE ASSIGNMENT
+# ============================================================
+
+async def assign_roles(
+    discord_user_id,
+    guild_id
+):
+
+    guild = bot.get_guild(
+        int(guild_id)
+    )
+
+    if not guild:
+        print(
+            f"Guild {guild_id} not found."
+        )
         return
 
-    print(
-        "$roles command error:",
-        repr(error)
+    member = guild.get_member(
+        int(discord_user_id)
     )
+
+    if not member:
+        try:
+            member = await guild.fetch_member(
+                int(discord_user_id)
+            )
+        except Exception:
+            print(
+                f"Could not find member {discord_user_id}."
+            )
+            return
+
+    subscribers, views = get_aggregate_totals(
+        discord_user_id
+    )
+
+    thresholds = [
+        (
+            "50K_SUBS",
+            subscribers >= 50_000
+        ),
+        (
+            "100K_SUBS",
+            subscribers >= 100_000
+        ),
+        (
+            "1M_SUBS",
+            subscribers >= 1_000_000
+        ),
+        (
+            "1M_VIEWS",
+            views >= 1_000_000
+        ),
+        (
+            "10M_VIEWS",
+            views >= 10_000_000
+        ),
+        (
+            "50M_VIEWS",
+            views >= 50_000_000
+        ),
+        (
+            "100M_VIEWS",
+            views >= 100_000_000
+        ),
+        (
+            "1B_VIEWS",
+            views >= 1_000_000_000
+        )
+    ]
+
+    for role_name, qualifies in thresholds:
+
+        if not qualifies:
+            continue
+
+        role_id = ROLE_MAP[role_name]
+
+        role = guild.get_role(
+            role_id
+        )
+
+        if not role:
+            print(
+                f"Role {role_id} not found."
+            )
+            continue
+
+        if role not in member.roles:
+
+            try:
+                await member.add_roles(
+                    role,
+                    reason="YouTube creator milestone verification"
+                )
+
+            except Exception as e:
+
+                print(
+                    f"Could not add {role_name}:",
+                    repr(e)
+                )
 
 
 # ============================================================
@@ -1518,79 +1450,87 @@ app = FastAPI()
 
 
 # ============================================================
-# GOOGLE LOGIN
+# LOGIN
 # ============================================================
 
 @app.get("/login")
-async def login(state: str):
+async def login(request: Request):
 
-    cleanup_expired_oauth_states()
+    state = request.query_params.get(
+        "state"
+    )
 
-    if state not in oauth_states:
-
+    if not state:
         return HTMLResponse(
-            "Invalid or expired verification session.",
+            """
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>Invalid verification link</h2>
+                <p>No OAuth state was provided.</p>
+            </body>
+            </html>
+            """,
             status_code=400
         )
 
-    if (
-        not GOOGLE_CLIENT_ID
-        or not GOOGLE_CLIENT_SECRET
-    ):
+    state_data = get_oauth_state(
+        state
+    )
 
+    if not state_data:
         return HTMLResponse(
-            "Google OAuth is not configured.",
-            status_code=500
+            """
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>Verification link expired</h2>
+                <p>
+                    Please return to Discord and press
+                    <b>Connect YouTube</b> again.
+                </p>
+            </body>
+            </html>
+            """,
+            status_code=400
         )
 
-    scopes = [
-
-        "openid",
-
-        "email",
-
-        "https://www.googleapis.com/auth/youtube.readonly"
-
-    ]
-
     params = {
-
-        "client_id":
-            GOOGLE_CLIENT_ID,
-
-        "redirect_uri":
-            REDIRECT_URI,
-
-        "response_type":
-            "code",
-
-        "scope":
-            " ".join(scopes),
-
-        "state":
-            state,
-
-        "access_type":
-            "offline",
-
-        "prompt":
-            "select_account"
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": REDIRECT_URI,
+        "response_type": "code",
+        "scope": (
+            "openid "
+            "email "
+            "https://www.googleapis.com/auth/youtube.readonly"
+        ),
+        "access_type": "offline",
+        "prompt": "select_account",
+        "state": state
     }
 
     google_url = (
-
-        "https://accounts.google.com/o/oauth2/v2/auth?"
+        GOOGLE_AUTH_URL
+        + "?"
         + urlencode(params)
-
     )
 
     return RedirectResponse(
-        google_url
+        google_url,
+        status_code=302
     )
 
 
 # ============================================================
-# GOOGLE CALLBACK
+# CALLBACK
 # ============================================================
 
 @app.get("/callback")
@@ -1598,70 +1538,83 @@ async def callback(
     request: Request
 ):
 
-    error = request.query_params.get(
-        "error"
+    state = request.query_params.get(
+        "state"
     )
-
-    if error:
-
-        safe_error = html.escape(
-            error
-        )
-
-        return HTMLResponse(
-
-            f"""
-            <h2>Verification cancelled</h2>
-            <p>Google returned: {safe_error}</p>
-            """,
-
-            status_code=400
-        )
 
     code = request.query_params.get(
         "code"
     )
 
-    state = request.query_params.get(
-        "state"
+    error = request.query_params.get(
+        "error"
     )
 
-    if not code or not state:
-
+    if error:
         return HTMLResponse(
-            "Missing OAuth code or state.",
+            f"""
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>Google authorization cancelled</h2>
+                <p>{html.escape(error)}</p>
+                <p>
+                    You can close this page and try again from Discord.
+                </p>
+            </body>
+            </html>
+            """,
             status_code=400
         )
 
-    state_data = oauth_states.pop(
-        state,
-        None
+    if not state or not code:
+        return HTMLResponse(
+            """
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>Invalid OAuth callback</h2>
+                <p>The required information was missing.</p>
+            </body>
+            </html>
+            """,
+            status_code=400
+        )
+
+    # --------------------------------------------------------
+    # Atomically consume the state.
+    # --------------------------------------------------------
+
+    state_data = consume_oauth_state(
+        state
     )
 
     if not state_data:
-
         return HTMLResponse(
-            "This verification session is invalid or expired.",
-            status_code=400
-        )
-
-    created_at = state_data[
-        "created_at"
-    ]
-
-    if (
-        datetime.now(
-            timezone.utc
-        ).timestamp()
-        - created_at
-        > 600
-    ):
-
-        return HTMLResponse(
-
-            "This verification session expired. "
-            "Please use the Connect YouTube button again.",
-
+            """
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>Verification link expired or was already used</h2>
+                <p>
+                    Return to Discord and press
+                    <b>Connect YouTube</b> again.
+                </p>
+            </body>
+            </html>
+            """,
             status_code=400
         )
 
@@ -1673,72 +1626,138 @@ async def callback(
         "guild_id"
     ]
 
-    ticket_channel_id = state_data.get(
+    ticket_channel_id = state_data[
         "channel_id"
-    )
+    ]
 
     # --------------------------------------------------------
-    # GOOGLE TOKEN
+    # Confirm the ticket still exists.
+    # --------------------------------------------------------
+
+    active_ticket = get_active_ticket(
+        discord_user_id
+    )
+
+    if not active_ticket:
+        return HTMLResponse(
+            """
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>Verification ticket closed</h2>
+                <p>
+                    Your verification ticket is no longer active.
+                </p>
+            </body>
+            </html>
+            """,
+            status_code=400
+        )
+
+    if (
+        str(active_ticket[1]) != str(guild_id)
+        or
+        str(active_ticket[2]) != str(ticket_channel_id)
+    ):
+        return HTMLResponse(
+            """
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>Verification ticket mismatch</h2>
+                <p>
+                    Please start a new verification connection
+                    from your active Discord ticket.
+                </p>
+            </body>
+            </html>
+            """,
+            status_code=400
+        )
+
+    # --------------------------------------------------------
+    # Exchange authorization code.
     # --------------------------------------------------------
 
     try:
 
-        token_data = await asyncio.to_thread(
-
-            exchange_code_for_token,
-
+        token_data = exchange_code_for_token(
             code
+        )
+
+        access_token = token_data[
+            "access_token"
+        ]
+
+    except Exception as e:
+
+        print(
+            "Google token exchange failed:",
+            repr(e)
+        )
+
+        return HTMLResponse(
+            """
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>Google connection failed</h2>
+                <p>
+                    The authorization code could not be exchanged.
+                </p>
+                <p>
+                    Please return to Discord and try again.
+                </p>
+            </body>
+            </html>
+            """,
+            status_code=500
+        )
+
+    # --------------------------------------------------------
+    # Get Google account.
+    # --------------------------------------------------------
+
+    try:
+
+        google_user = get_google_user(
+            access_token
         )
 
     except Exception as e:
 
         print(
-            "Google token exchange exception:",
+            "Google user lookup failed:",
             repr(e)
         )
 
         return HTMLResponse(
-            "Google authorization failed. Please try again.",
-            status_code=400
-        )
-
-    if "error" in token_data:
-
-        print(
-            "Google token error:",
-            token_data
-        )
-
-        return HTMLResponse(
-            "Google authorization failed. Please try again.",
-            status_code=400
-        )
-
-    access_token = token_data.get(
-        "access_token"
-    )
-
-    if not access_token:
-
-        return HTMLResponse(
-            "Google did not provide an access token.",
-            status_code=400
-        )
-
-    # --------------------------------------------------------
-    # GOOGLE USER
-    # --------------------------------------------------------
-
-    google_user = await asyncio.to_thread(
-        get_google_user,
-        access_token
-    )
-
-    if not google_user:
-
-        return HTMLResponse(
-            "Could not identify your Google account.",
-            status_code=400
+            """
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>Could not identify your Google account</h2>
+                <p>Please try again.</p>
+            </body>
+            </html>
+            """,
+            status_code=500
         )
 
     google_sub = google_user.get(
@@ -1746,1173 +1765,535 @@ async def callback(
     )
 
     google_email = google_user.get(
-        "email",
-        "Unknown Google account"
+        "email"
     )
 
     if not google_sub:
 
         return HTMLResponse(
-            "Google account identification failed.",
+            """
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>Google account information missing</h2>
+                <p>Please try again.</p>
+            </body>
+            </html>
+            """,
             status_code=400
         )
 
     # --------------------------------------------------------
-    # SAME GOOGLE ACCOUNT CANNOT BE VERIFIED TWICE
+    # Prevent duplicate Gmail / Google account verification.
     # --------------------------------------------------------
 
-    existing_google = (
-        get_google_account_by_sub(
-            google_sub
-        )
+    existing_google_account = get_google_account_by_sub(
+        google_sub
     )
 
-    if existing_google:
+    if existing_google_account:
+
+        existing_discord_user_id = str(
+            existing_google_account[1]
+        )
+
+        if (
+            existing_discord_user_id
+            == str(discord_user_id)
+        ):
+            message = (
+                "This Gmail is already verified "
+                "for your Discord account."
+            )
+
+        else:
+            message = (
+                "This Gmail is already verified "
+                "by another Discord account."
+            )
 
         return HTMLResponse(
-
-            """
-            <h2>Already verified</h2>
-
-            <p>
-            This Google account is already verified.
-            Please connect a different Google account.
-            </p>
+            f"""
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>Google account already verified</h2>
+                <p>{html.escape(message)}</p>
+                <p>
+                    Return to Discord to continue.
+                </p>
+            </body>
+            </html>
             """,
-
-            status_code=400
+            status_code=409
         )
 
     # --------------------------------------------------------
-    # GET ALL YOUTUBE CHANNELS
+    # Get ALL YouTube channels owned by Google account.
     # --------------------------------------------------------
 
-    youtube_result = await asyncio.to_thread(
+    try:
 
-        get_all_youtube_channels,
+        channels = get_all_youtube_channels(
+            access_token
+        )
 
-        access_token
-    )
-
-    if youtube_result["error"]:
+    except Exception as e:
 
         print(
-            "YouTube API error:",
-            youtube_result["error"]
+            "YouTube channel lookup failed:",
+            repr(e)
         )
 
         return HTMLResponse(
-            "Could not retrieve your YouTube channels.",
-            status_code=400
+            """
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>YouTube lookup failed</h2>
+                <p>
+                    We couldn't retrieve your YouTube channels.
+                </p>
+                <p>Please try again.</p>
+            </body>
+            </html>
+            """,
+            status_code=500
         )
-
-    channels = youtube_result[
-        "channels"
-    ]
 
     if not channels:
 
         return HTMLResponse(
-
             """
-            <h2>No YouTube channels found</h2>
-
-            <p>
-            The Google account you connected does not
-            have a YouTube channel that this authorization
-            can access.
-            </p>
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>No YouTube channels found</h2>
+                <p>
+                    This Google account does not appear to
+                    have an accessible YouTube channel.
+                </p>
+            </body>
+            </html>
             """,
-
             status_code=400
         )
 
     # --------------------------------------------------------
-    # SAME YOUTUBE CHANNEL CANNOT BE VERIFIED TWICE
+    # Prevent already verified YouTube channels.
     # --------------------------------------------------------
+
+    duplicate_channels = []
 
     for channel in channels:
 
-        channel_id = channel[
-            "id"
-        ]
-
-        existing_channel = (
-            get_verified_channel(
-                channel_id
-            )
+        existing_channel = get_verified_channel(
+            channel["id"]
         )
 
         if existing_channel:
-
-            safe_title = html.escape(
+            duplicate_channels.append(
                 channel["title"]
             )
 
-            return HTMLResponse(
+    if duplicate_channels:
 
-                f"""
-                <h2>Channel already verified</h2>
-
-                <p>
-                The YouTube channel
-                <strong>{safe_title}</strong>
-                is already verified.
-                </p>
-                """,
-
-                status_code=400
-            )
-
-    # --------------------------------------------------------
-    # ACCOUNT TOTALS
-    # --------------------------------------------------------
-
-    total_subscribers = sum(
-
-        channel["subscribers"]
-
-        for channel in channels
-
-    )
-
-    total_views = sum(
-
-        channel["views"]
-
-        for channel in channels
-
-    )
-
-    print(
-        "--------------------------------"
-    )
-
-    print(
-        "NEW GOOGLE ACCOUNT VERIFICATION"
-    )
-
-    print(
-        "Discord ID:",
-        discord_user_id
-    )
-
-    print(
-        "Google:",
-        google_email
-    )
-
-    print(
-        "Guild ID:",
-        guild_id
-    )
-
-    print(
-        "Channels:",
-        len(channels)
-    )
-
-    for channel in channels:
-
-        print(
-
-            "-",
-
-            channel["title"],
-
-            "|",
-
-            channel["subscribers"],
-
-            "subs |",
-
-            channel["views"],
-
-            "views"
-
+        channel_names = ", ".join(
+            duplicate_channels
         )
 
-    print(
-
-        "THIS ACCOUNT TOTAL:",
-
-        total_subscribers,
-
-        "subs |",
-
-        total_views,
-
-        "views"
-
-    )
-
-    print(
-        "--------------------------------"
-    )
+        return HTMLResponse(
+            f"""
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>YouTube channel already verified</h2>
+                <p>
+                    The following channel(s) are already verified:
+                </p>
+                <p>
+                    {html.escape(channel_names)}
+                </p>
+                <p>
+                    Return to Discord to continue.
+                </p>
+            </body>
+            </html>
+            """,
+            status_code=409
+        )
 
     # --------------------------------------------------------
-    # SAVE
+    # Save Google account + all channels.
     # --------------------------------------------------------
 
     try:
 
         save_google_account_and_channels(
-
             discord_user_id=discord_user_id,
-
             google_sub=google_sub,
-
             google_email=google_email,
-
             channels=channels
-
         )
 
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as e:
+
+        print(
+            "Duplicate verification prevented by database:",
+            repr(e)
+        )
 
         return HTMLResponse(
-
             """
-            <h2>Already verified</h2>
-
-            <p>
-            This Google account or one of these
-            YouTube channels has already been verified.
-            </p>
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>This account or channel is already verified</h2>
+                <p>
+                    Return to Discord to continue.
+                </p>
+            </body>
+            </html>
             """,
-
-            status_code=400
+            status_code=409
         )
 
     except Exception as e:
 
         print(
-            "Database error:",
+            "Database save failed:",
             repr(e)
         )
 
         return HTMLResponse(
-
-            "The verification could not be saved. Please try again.",
-
+            """
+            <html>
+            <body style="
+                background:#111;
+                color:white;
+                font-family:Arial;
+                padding:40px;
+            ">
+                <h2>Verification could not be saved</h2>
+                <p>Please try again.</p>
+            </body>
+            </html>
+            """,
             status_code=500
         )
 
     # --------------------------------------------------------
-    # COMBINED TOTALS
+    # Calculate totals across ALL verified channels.
     # --------------------------------------------------------
 
-    combined_subscribers, combined_views = (
-
-        get_aggregate_totals(
-
-            discord_user_id
-
-        )
-
-    )
-
-    print(
-
-        "COMBINED TOTAL:",
-
-        combined_subscribers,
-
-        "subs |",
-
-        combined_views,
-
-        "views"
-
-    )
-
-    # --------------------------------------------------------
-    # ADD ROLES
-    # --------------------------------------------------------
-
-    try:
-
-        asyncio.run_coroutine_threadsafe(
-
-            assign_roles(
-
-                guild_id,
-
-                discord_user_id,
-
-                combined_subscribers,
-
-                combined_views
-
-            ),
-
-            bot.loop
-
-        )
-
-    except Exception as e:
-
-        print(
-            "Could not schedule role assignment:",
-            repr(e)
-        )
-
-    # --------------------------------------------------------
-    # SEND ANOTHER CONNECT BUTTON
-    # --------------------------------------------------------
-
-    ticket_channel = None
-
-    if ticket_channel_id:
-
-        ticket_channel = bot.get_channel(
-            ticket_channel_id
-        )
-
-    if ticket_channel is not None:
-
-        try:
-
-            await send_verification_controls(
-
-                discord_user_id,
-
-                guild_id,
-
-                ticket_channel
-
-            )
-
-        except Exception as e:
-
-            print(
-
-                "Could not send next verification controls:",
-
-                repr(e)
-
-            )
-
-    # --------------------------------------------------------
-    # SUCCESS PAGE
-    # --------------------------------------------------------
-
-    channel_text = "<br>".join(
-
-        f"• {html.escape(channel['title'])}"
-
-        for channel in channels
-
-    )
-
-    safe_email = html.escape(
-        google_email
-    )
-
-    return HTMLResponse(
-
-        f"""
-        <!DOCTYPE html>
-
-        <html>
-
-        <head>
-
-            <title>Verification Complete</title>
-
-        </head>
-
-        <body>
-
-            <h1>✅ Verification Complete</h1>
-
-            <p>
-            <strong>Google account:</strong>
-            {safe_email}
-            </p>
-
-            <p>
-            <strong>Channels added:</strong>
-            </p>
-
-            {channel_text}
-
-            <hr>
-
-            <p>
-            <strong>This account's subscribers:</strong>
-            {total_subscribers:,}
-            </p>
-
-            <p>
-            <strong>This account's views:</strong>
-            {total_views:,}
-            </p>
-
-            <hr>
-
-            <p>
-            <strong>Combined subscribers:</strong>
-            {combined_subscribers:,}
-            </p>
-
-            <p>
-            <strong>Combined views:</strong>
-            {combined_views:,}
-            </p>
-
-            <p>
-            Your Discord roles have been updated.
-            </p>
-
-            <p>
-            You can return to Discord and connect another
-            Google/YouTube account if needed.
-            </p>
-
-        </body>
-
-        </html>
-        """
-
-    )
-
-
-# ============================================================
-# GOOGLE / YOUTUBE HELPERS
-# ============================================================
-
-def exchange_code_for_token(
-    code
-):
-
-    response = requests.post(
-
-        "https://oauth2.googleapis.com/token",
-
-        data={
-
-            "code":
-                code,
-
-            "client_id":
-                GOOGLE_CLIENT_ID,
-
-            "client_secret":
-                GOOGLE_CLIENT_SECRET,
-
-            "redirect_uri":
-                REDIRECT_URI,
-
-            "grant_type":
-                "authorization_code"
-
-        },
-
-        timeout=20
-    )
-
-    response.raise_for_status()
-
-    return response.json()
-
-
-def get_google_user(
-    access_token
-):
-
-    response = requests.get(
-
-        "https://openidconnect.googleapis.com/v1/userinfo",
-
-        headers={
-
-            "Authorization":
-                f"Bearer {access_token}"
-
-        },
-
-        timeout=20
-    )
-
-    if response.status_code != 200:
-
-        print(
-            "Google userinfo error:",
-            response.text
-        )
-
-        return None
-
-    return response.json()
-
-
-def get_all_youtube_channels(
-    access_token
-):
-
-    channels = []
-
-    page_token = None
-
-    while True:
-
-        params = {
-
-            "part":
-                "snippet,statistics",
-
-            "mine":
-                "true",
-
-            "maxResults":
-                50
-
-        }
-
-        if page_token:
-
-            params["pageToken"] = page_token
-
-        response = requests.get(
-
-            "https://www.googleapis.com/youtube/v3/channels",
-
-            headers={
-
-                "Authorization":
-                    f"Bearer {access_token}"
-
-            },
-
-            params=params,
-
-            timeout=20
-
-        )
-
-        if response.status_code != 200:
-
-            return {
-
-                "channels": [],
-
-                "error": response.text
-
-            }
-
-        data = response.json()
-
-        for item in data.get(
-            "items",
-            []
-        ):
-
-            statistics = item.get(
-                "statistics",
-                {}
-            )
-
-            snippet = item.get(
-                "snippet",
-                {}
-            )
-
-            channel_id = item.get(
-                "id"
-            )
-
-            if not channel_id:
-
-                continue
-
-            channel = {
-
-                "id":
-                    channel_id,
-
-                "title":
-                    snippet.get(
-                        "title",
-                        "Unknown Channel"
-                    ),
-
-                "subscribers":
-                    int(
-                        statistics.get(
-                            "subscriberCount",
-                            0
-                        )
-                    ),
-
-                "views":
-                    int(
-                        statistics.get(
-                            "viewCount",
-                            0
-                        )
-                    )
-
-            }
-
-            channels.append(
-                channel
-            )
-
-        page_token = data.get(
-            "nextPageToken"
-        )
-
-        if not page_token:
-
-            break
-
-    return {
-
-        "channels":
-            channels,
-
-        "error":
-            None
-
-    }
-
-
-# ============================================================
-# ROLE ASSIGNMENT
-# ============================================================
-
-async def assign_roles(
-
-    guild_id,
-
-    discord_user_id,
-
-    subscribers,
-
-    views
-
-):
-
-    guild = bot.get_guild(
-        guild_id
-    )
-
-    if guild is None:
-
-        print(
-            "Could not find Discord guild:",
-            guild_id
-        )
-
-        return
-
-    member = guild.get_member(
+    subscribers, views = get_aggregate_totals(
         discord_user_id
     )
 
-    if member is None:
-
-        try:
-
-            member = await guild.fetch_member(
-                discord_user_id
-            )
-
-        except discord.NotFound:
-
-            print(
-                "Could not find Discord member:",
-                discord_user_id
-            )
-
-            return
-
-        except discord.HTTPException as e:
-
-            print(
-                "Could not fetch Discord member:",
-                repr(e)
-            )
-
-            return
-
-        except Exception as e:
-
-            print(
-                "Could not fetch Discord member:",
-                repr(e)
-            )
-
-            return
-
-    roles_to_add = []
-
-    subscriber_milestones = [
-
-        (
-            50_000,
-            "50K_SUBS"
-        ),
-
-        (
-            100_000,
-            "100K_SUBS"
-        ),
-
-        (
-            1_000_000,
-            "1M_SUBS"
-        )
-
-    ]
-
-    for threshold, role_key in subscriber_milestones:
-
-        if subscribers >= threshold:
-
-            role = guild.get_role(
-                ROLE_MAP[role_key]
-            )
-
-            if role:
-
-                roles_to_add.append(
-                    role
-                )
-
-    view_milestones = [
-
-        (
-            1_000_000,
-            "1M_VIEWS"
-        ),
-
-        (
-            10_000_000,
-            "10M_VIEWS"
-        ),
-
-        (
-            50_000_000,
-            "50M_VIEWS"
-        ),
-
-        (
-            100_000_000,
-            "100M_VIEWS"
-        ),
-
-        (
-            1_000_000_000,
-            "1B_VIEWS"
-        )
-
-    ]
-
-    for threshold, role_key in view_milestones:
-
-        if views >= threshold:
-
-            role = guild.get_role(
-                ROLE_MAP[role_key]
-            )
-
-            if role:
-
-                roles_to_add.append(
-                    role
-                )
-
-    if not roles_to_add:
-
-        print(
-            f"{member} did not reach any milestone."
-        )
-
-        return
-
-    # Remove duplicate roles.
-    unique_roles = []
-
-    seen_role_ids = set()
-
-    for role in roles_to_add:
-
-        if role.id not in seen_role_ids:
-
-            unique_roles.append(
-                role
-            )
-
-            seen_role_ids.add(
-                role.id
-            )
+    # --------------------------------------------------------
+    # Assign roles.
+    # --------------------------------------------------------
 
     try:
 
-        await member.add_roles(
-
-            *unique_roles,
-
-            reason="YouTube milestone verification"
-
+        awaitable = assign_roles(
+            discord_user_id,
+            guild_id
         )
 
-        print(
+        # Because FastAPI runs separately from Discord's
+        # event loop, schedule the coroutine on the bot loop.
+        if bot.loop and bot.loop.is_running():
 
-            f"Added {len(unique_roles)} roles "
-
-            f"to {member}"
-
-        )
-
-    except discord.Forbidden:
-
-        print(
-            "ERROR: Bot cannot assign one or more roles."
-        )
-
-        print(
-
-            "Make sure the bot's highest role is "
-
-            "above the milestone roles."
-
-        )
-
-    except discord.HTTPException as e:
-
-        print(
-            "Role assignment Discord HTTP error:",
-            repr(e)
-        )
+            asyncio.run_coroutine_threadsafe(
+                awaitable,
+                bot.loop
+            )
 
     except Exception as e:
 
         print(
-            "Role assignment error:",
+            "Role assignment scheduling failed:",
             repr(e)
         )
 
+    # --------------------------------------------------------
+    # Send fresh Connect YouTube controls.
+    # --------------------------------------------------------
 
-# ============================================================
-# FASTAPI HOME PAGE
-# ============================================================
+    channel = bot.get_channel(
+        int(ticket_channel_id)
+    )
 
-@app.get("/")
-async def homepage():
+    if channel:
+
+        discord_user = guild_member = None
+
+        guild = bot.get_guild(
+            int(guild_id)
+        )
+
+        if guild:
+
+            guild_member = guild.get_member(
+                int(discord_user_id)
+            )
+
+        if guild_member:
+
+            try:
+
+                awaitable = send_verification_controls(
+                    channel,
+                    guild_member
+                )
+
+                if bot.loop and bot.loop.is_running():
+
+                    asyncio.run_coroutine_threadsafe(
+                        awaitable,
+                        bot.loop
+                    )
+
+            except Exception as e:
+
+                print(
+                    "Could not schedule new controls:",
+                    repr(e)
+                )
+
+    # --------------------------------------------------------
+    # Success page.
+    # --------------------------------------------------------
+
+    safe_email = html.escape(
+        google_email or "Google account"
+    )
+
+    channel_count = len(
+        channels
+    )
 
     return HTMLResponse(
-
-        """
-        <!DOCTYPE html>
-
+        f"""
         <html>
-
         <head>
-
-            <meta charset="UTF-8">
-
-            <meta name="viewport"
-                  content="width=device-width, initial-scale=1.0">
-
-            <title>PRINT Creator Verification</title>
-
+            <title>Verification Complete</title>
         </head>
 
-        <body>
+        <body style="
+            margin:0;
+            min-height:100vh;
+            background:#111;
+            color:white;
+            font-family:Arial,sans-serif;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+        ">
 
-            <h1>PRINT Creator Verification</h1>
+            <div style="
+                max-width:650px;
+                padding:40px;
+                text-align:center;
+            ">
 
-            <p>
-            This website is used by members of the
-            PRINT Discord server to verify YouTube
-            creator milestones.
-            </p>
+                <h1>✅ Verification Complete</h1>
 
-            <p>
-            The application reads YouTube channel
-            subscriber and view statistics through
-            Google's YouTube API after the user grants
-            permission.
-            </p>
+                <p>
+                    Your YouTube account has been successfully verified.
+                </p>
 
-            <p>
-            No verification can be started from this page.
-            Start verification through the PRINT Discord server.
-            </p>
+                <p>
+                    <b>{safe_email}</b>
+                </p>
 
-            <h2>Privacy</h2>
+                <hr style="
+                    margin:30px 0;
+                    opacity:.2;
+                ">
 
-            <p>
-            YouTube data is used only to determine
-            creator milestone roles in the Discord server.
-            </p>
+                <p>
+                    YouTube channels verified:
+                    <b>{channel_count}</b>
+                </p>
 
-            <p>
-            <a href="/privacy">Read our Privacy Policy</a>
-            </p>
+                <p>
+                    Total subscribers:
+                    <b>{subscribers:,}</b>
+                </p>
+
+                <p>
+                    Total views:
+                    <b>{views:,}</b>
+                </p>
+
+                <p style="
+                    margin-top:30px;
+                    opacity:.75;
+                ">
+                    You can return to Discord now.
+                </p>
+
+            </div>
 
         </body>
-
         </html>
         """
-
     )
 
 
 # ============================================================
-# PRIVACY POLICY
+# HOME
+# ============================================================
+
+@app.get("/")
+async def home():
+
+    return HTMLResponse(
+        f"""
+        <html>
+        <head>
+            <title>PRINT Creator Verification</title>
+        </head>
+
+        <body style="
+            margin:0;
+            min-height:100vh;
+            background:#111;
+            color:white;
+            font-family:Arial,sans-serif;
+            display:flex;
+            align-items:center;
+            justify-content:center;
+        ">
+
+            <div style="
+                text-align:center;
+                max-width:650px;
+                padding:40px;
+            ">
+
+                <h1>PRINT Creator Verification</h1>
+
+                <p>
+                    This service handles YouTube creator
+                    milestone verification for the PRINT Discord server.
+                </p>
+
+                <p style="opacity:.7;">
+                    OAuth callback:
+                    {html.escape(REDIRECT_URI)}
+                </p>
+
+            </div>
+
+        </body>
+        </html>
+        """
+    )
+
+
+# ============================================================
+# PRIVACY
 # ============================================================
 
 @app.get("/privacy")
-async def privacy_policy():
+async def privacy():
 
     return HTMLResponse(
-
         """
-        <!DOCTYPE html>
-
         <html>
-
         <head>
-
-            <meta charset="UTF-8">
-
-            <meta name="viewport"
-                  content="width=device-width, initial-scale=1.0">
-
-            <title>
-                PRINT Creator Verification - Privacy Policy
-            </title>
-
+            <title>Privacy Policy</title>
         </head>
 
-        <body>
+        <body style="
+            background:#111;
+            color:white;
+            font-family:Arial,sans-serif;
+            line-height:1.6;
+            padding:40px;
+        ">
 
             <h1>Privacy Policy</h1>
 
             <p>
-            <strong>Last updated:</strong>
-            September 24, 2026
-            </p>
-
-            <h2>1. What this application does</h2>
-
-            <p>
-            PRINT Creator Verification is a Discord verification
-            application that allows members of the PRINT Discord
-            server to verify YouTube creator milestones.
+                This verification service uses Google OAuth
+                to verify YouTube creator statistics.
             </p>
 
             <p>
-            After a user authorizes the application through Google,
-            the application retrieves information from the user's
-            YouTube account to determine whether the user qualifies
-            for creator milestone roles in the PRINT Discord server.
-            </p>
-
-            <h2>2. Information we collect</h2>
-
-            <p>
-            When you use the verification system, the application
-            may receive and store:
-            </p>
-
-            <ul>
-
-                <li>Your Discord user ID</li>
-
-                <li>Your Google account identifier</li>
-
-                <li>Your Google account email address</li>
-
-                <li>Your YouTube channel ID</li>
-
-                <li>Your YouTube channel name</li>
-
-                <li>Your YouTube subscriber count</li>
-
-                <li>Your YouTube channel view count</li>
-
-                <li>The date and time of verification</li>
-
-            </ul>
-
-            <h2>3. How your information is used</h2>
-
-            <p>
-            The information obtained through Google and YouTube is
-            used to verify creator milestones and assign the
-            corresponding roles within the PRINT Discord server.
+                The service stores the information required
+                to prevent duplicate verification and assign
+                Discord milestone roles.
             </p>
 
             <p>
-            The information is not used to provide advertising,
-            sell personal information, or build advertising profiles.
-            </p>
-
-            <h2>4. Google and YouTube access</h2>
-
-            <p>
-            The application uses Google's OAuth authorization system.
-            You choose whether to grant the requested permissions.
-            </p>
-
-            <p>
-            The application requests access necessary to identify
-            your Google account and retrieve YouTube channel
-            information required for verification.
-            </p>
-
-            <p>
-            You can revoke the application's access to your Google
-            account through your Google Account security settings.
-            </p>
-
-            <h2>5. Data storage</h2>
-
-            <p>
-            Verification information is stored by the application
-            so that a verified Discord account or YouTube channel
-            cannot simply be verified repeatedly.
-            </p>
-
-            <h2>6. Data sharing</h2>
-
-            <p>
-            Verification information is not sold or shared with
-            third parties for advertising purposes.
-            </p>
-
-            <p>
-            The application may interact with Google, YouTube,
-            Discord, and the hosting provider as necessary to
-            operate the verification system.
-            </p>
-
-            <h2>7. Data deletion</h2>
-
-            <p>
-            If you want your stored verification information removed,
-            contact the administrators of the PRINT Discord server.
-            Requests can be reviewed and handled by the application
-            administrators.
-            </p>
-
-            <h2>8. Changes to this policy</h2>
-
-            <p>
-            This Privacy Policy may be updated when the verification
-            system or its data practices change.
-            </p>
-
-            <h2>9. Contact</h2>
-
-            <p>
-            For questions about this Privacy Policy or the
-            verification system, contact the administrators of the
-            PRINT Discord server.
-            </p>
-
-            <p>
-            <a href="/">
-                Return to PRINT Creator Verification
-            </a>
+                YouTube account information is used only for
+                the creator verification system.
             </p>
 
         </body>
-
         </html>
         """
-
     )
 
 
 # ============================================================
-# RUN DISCORD BOT
+# RUN FASTAPI
 # ============================================================
 
-def run_bot():
+def run_web_server():
 
-    try:
+    port = int(
+        os.getenv("PORT", "10000")
+    )
 
-        bot.run(
-            BOT_TOKEN
-        )
-
-    except Exception as e:
-
-        print(
-            "Discord bot stopped:",
-            repr(e)
-        )
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port
+    )
 
 
 # ============================================================
-# START EVERYTHING
+# START
 # ============================================================
 
 if __name__ == "__main__":
 
-    validate_configuration()
-
-    init_database()
-
-    print(
-        "===================================="
-    )
-
-    print(
-        "PRINT verification system starting"
-    )
-
-    print(
-        "Public URL:",
-        PUBLIC_BASE_URL
-    )
-
-    print(
-        "Redirect URI:",
-        REDIRECT_URI
-    )
-
-    print(
-        "Database:",
-        DATABASE_FILE
-    )
-
-    print(
-        "Discord ticket protection: ENABLED"
-    )
-
-    print(
-        "Discord API rate-limit protection: ENABLED"
-    )
-
-    print(
-        "===================================="
-    )
-
-    bot_thread = threading.Thread(
-        target=run_bot,
+    web_thread = threading.Thread(
+        target=run_web_server,
         daemon=True
     )
 
-    bot_thread.start()
+    web_thread.start()
 
-    uvicorn.run(
-
-        app,
-
-        host="0.0.0.0",
-
-        port=int(
-            os.getenv(
-                "PORT",
-                "8000"
-            )
-        )
-
+    bot.run(
+        BOT_TOKEN
     )
