@@ -28,12 +28,26 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+PUBLIC_BASE_URL = os.getenv(
+    "PUBLIC_BASE_URL",
+    ""
+).strip().rstrip("/")
+
 REDIRECT_URI = f"{PUBLIC_BASE_URL}/callback"
 
 TICKET_CATEGORY_ID = 1552294553413746769
 
-DATABASE_FILE = os.getenv("DATABASE_FILE", "verification.db")
+DATABASE_FILE = os.getenv(
+    "DATABASE_FILE",
+    "verification.db"
+)
+
+# A pending ticket reservation is considered stale after
+# this amount of time. This prevents an old crashed/stuck
+# reservation from permanently blocking the user while
+# also preventing two simultaneous clicks from creating
+# two tickets.
+PENDING_TICKET_LIFETIME = 120
 
 
 ROLE_MAP = {
@@ -66,7 +80,9 @@ if not PUBLIC_BASE_URL:
     raise RuntimeError("PUBLIC_BASE_URL is missing.")
 
 if not PUBLIC_BASE_URL.startswith("https://"):
-    raise RuntimeError("PUBLIC_BASE_URL must start with https://")
+    raise RuntimeError(
+        "PUBLIC_BASE_URL must start with https://"
+    )
 
 
 # ============================================================
@@ -74,23 +90,34 @@ if not PUBLIC_BASE_URL.startswith("https://"):
 # ============================================================
 
 def get_connection():
+
     conn = sqlite3.connect(
         DATABASE_FILE,
         timeout=30,
         check_same_thread=False
     )
 
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute(
+        "PRAGMA foreign_keys = ON"
+    )
+
+    conn.execute(
+        "PRAGMA journal_mode = WAL"
+    )
+
+    conn.execute(
+        "PRAGMA busy_timeout = 30000"
+    )
 
     return conn
 
 
 def init_database():
+
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
         # ----------------------------------------------------
@@ -155,10 +182,6 @@ def init_database():
 
         # ----------------------------------------------------
         # Persistent OAuth states
-        #
-        # IMPORTANT:
-        # This used to exist only in Python memory.
-        # It now lives in SQLite.
         # ----------------------------------------------------
 
         cursor.execute("""
@@ -188,7 +211,13 @@ def init_database():
         old_rows = cursor.fetchall()
 
         for row in old_rows:
-            discord_user_id, google_sub, google_email, verified_at = row
+
+            (
+                discord_user_id,
+                google_sub,
+                google_email,
+                verified_at
+            ) = row
 
             if not discord_user_id or not google_sub:
                 continue
@@ -205,12 +234,16 @@ def init_database():
                 str(discord_user_id),
                 str(google_sub),
                 google_email,
-                verified_at or datetime.now(timezone.utc).isoformat()
+                verified_at
+                or datetime.now(
+                    timezone.utc
+                ).isoformat()
             ))
 
         conn.commit()
 
     finally:
+
         conn.close()
 
 
@@ -222,9 +255,11 @@ init_database()
 # ============================================================
 
 def get_google_account_by_sub(google_sub):
+
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -236,18 +271,23 @@ def get_google_account_by_sub(google_sub):
                 verified_at
             FROM google_accounts
             WHERE google_sub = ?
-        """, (str(google_sub),))
+        """, (
+            str(google_sub),
+        ))
 
         return cursor.fetchone()
 
     finally:
+
         conn.close()
 
 
 def get_accounts_for_discord(discord_user_id):
+
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -257,18 +297,23 @@ def get_accounts_for_discord(discord_user_id):
                 verified_at
             FROM google_accounts
             WHERE discord_user_id = ?
-        """, (str(discord_user_id),))
+        """, (
+            str(discord_user_id),
+        ))
 
         return cursor.fetchall()
 
     finally:
+
         conn.close()
 
 
 def get_verified_channel(channel_id):
+
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -281,18 +326,23 @@ def get_verified_channel(channel_id):
                 verified_at
             FROM verified_channels
             WHERE channel_id = ?
-        """, (str(channel_id),))
+        """, (
+            str(channel_id),
+        ))
 
         return cursor.fetchone()
 
     finally:
+
         conn.close()
 
 
 def get_aggregate_totals(discord_user_id):
+
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -301,13 +351,16 @@ def get_aggregate_totals(discord_user_id):
                 COALESCE(SUM(view_count), 0)
             FROM verified_channels
             WHERE discord_user_id = ?
-        """, (str(discord_user_id),))
+        """, (
+            str(discord_user_id),
+        ))
 
         row = cursor.fetchone()
 
         return int(row[0]), int(row[1])
 
     finally:
+
         conn.close()
 
 
@@ -317,12 +370,16 @@ def save_google_account_and_channels(
     google_email,
     channels
 ):
+
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
-        verified_at = datetime.now(timezone.utc).isoformat()
+        verified_at = datetime.now(
+            timezone.utc
+        ).isoformat()
 
         cursor.execute("""
             INSERT INTO google_accounts (
@@ -340,6 +397,7 @@ def save_google_account_and_channels(
         ))
 
         for channel in channels:
+
             cursor.execute("""
                 INSERT INTO verified_channels (
                     channel_id,
@@ -362,10 +420,12 @@ def save_google_account_and_channels(
         conn.commit()
 
     except Exception:
+
         conn.rollback()
         raise
 
     finally:
+
         conn.close()
 
 
@@ -374,9 +434,11 @@ def save_google_account_and_channels(
 # ============================================================
 
 def get_active_ticket(discord_user_id):
+
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -387,44 +449,150 @@ def get_active_ticket(discord_user_id):
                 created_at
             FROM active_tickets
             WHERE discord_user_id = ?
-        """, (str(discord_user_id),))
+        """, (
+            str(discord_user_id),
+        ))
 
         return cursor.fetchone()
 
     finally:
+
         conn.close()
 
 
-def reserve_ticket_slot(discord_user_id, guild_id):
+def is_pending_ticket_stale(created_at):
+
+    try:
+
+        created_time = datetime.fromisoformat(
+            str(created_at)
+        )
+
+        if created_time.tzinfo is None:
+            created_time = created_time.replace(
+                tzinfo=timezone.utc
+            )
+
+        age = (
+            datetime.now(timezone.utc)
+            - created_time
+        ).total_seconds()
+
+        return age > PENDING_TICKET_LIFETIME
+
+    except Exception as e:
+
+        print(
+            "Could not parse pending ticket timestamp:",
+            repr(e)
+        )
+
+        # If the timestamp itself is invalid,
+        # treat the reservation as stale so it
+        # cannot permanently lock the user.
+        return True
+
+
+def reserve_ticket_slot(
+    discord_user_id,
+    guild_id
+):
     """
     Atomically reserve a ticket slot.
 
-    This prevents two simultaneous clicks from creating
-    two tickets for the same Discord account.
+    A pending-* reservation means a ticket is currently
+    being created.
+
+    A pending reservation older than
+    PENDING_TICKET_LIFETIME is treated as stale.
+
+    This prevents simultaneous button clicks from creating
+    duplicate tickets while still recovering from a previous
+    failed/crashed ticket creation.
     """
 
     token = secrets.token_urlsafe(16)
-    pending_channel_id = f"pending-{token}"
-    created_at = datetime.now(timezone.utc).isoformat()
+
+    pending_channel_id = (
+        f"pending-{token}"
+    )
+
+    created_at = datetime.now(
+        timezone.utc
+    ).isoformat()
 
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
-        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            "BEGIN IMMEDIATE"
+        )
 
         cursor.execute("""
-            SELECT channel_id
+            SELECT
+                channel_id,
+                created_at
             FROM active_tickets
             WHERE discord_user_id = ?
-        """, (str(discord_user_id),))
+        """, (
+            str(discord_user_id),
+        ))
 
         existing = cursor.fetchone()
 
         if existing:
-            conn.rollback()
-            return False, existing[0]
+
+            existing_channel_id = str(
+                existing[0]
+            )
+
+            existing_created_at = existing[1]
+
+            # ------------------------------------------------
+            # Existing ticket is currently being created.
+            # ------------------------------------------------
+
+            if existing_channel_id.startswith(
+                "pending-"
+            ):
+
+                if not is_pending_ticket_stale(
+                    existing_created_at
+                ):
+
+                    conn.rollback()
+
+                    return (
+                        False,
+                        existing_channel_id
+                    )
+
+                # ------------------------------------------------
+                # Old/stuck pending reservation.
+                # ------------------------------------------------
+
+                cursor.execute("""
+                    DELETE FROM active_tickets
+                    WHERE discord_user_id = ?
+                """, (
+                    str(discord_user_id),
+                ))
+
+            else:
+
+                # ------------------------------------------------
+                # Real Discord channel already exists in DB.
+                # ------------------------------------------------
+
+                conn.rollback()
+
+                return (
+                    False,
+                    existing_channel_id
+                )
 
         cursor.execute("""
             INSERT INTO active_tickets (
@@ -443,20 +611,30 @@ def reserve_ticket_slot(discord_user_id, guild_id):
 
         conn.commit()
 
-        return True, pending_channel_id
+        return (
+            True,
+            pending_channel_id
+        )
 
     except Exception:
+
         conn.rollback()
         raise
 
     finally:
+
         conn.close()
 
 
-def set_active_ticket_channel(discord_user_id, channel_id):
+def set_active_ticket_channel(
+    discord_user_id,
+    channel_id
+):
+
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -471,40 +649,55 @@ def set_active_ticket_channel(discord_user_id, channel_id):
         conn.commit()
 
     finally:
+
         conn.close()
 
 
-def delete_active_ticket(discord_user_id):
+def delete_active_ticket(
+    discord_user_id
+):
+
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
         cursor.execute("""
             DELETE FROM active_tickets
             WHERE discord_user_id = ?
-        """, (str(discord_user_id),))
+        """, (
+            str(discord_user_id),
+        ))
 
         conn.commit()
 
     finally:
+
         conn.close()
 
 
-def delete_active_ticket_by_channel(channel_id):
+def delete_active_ticket_by_channel(
+    channel_id
+):
+
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
         cursor.execute("""
             DELETE FROM active_tickets
             WHERE channel_id = ?
-        """, (str(channel_id),))
+        """, (
+            str(channel_id),
+        ))
 
         conn.commit()
 
     finally:
+
         conn.close()
 
 
@@ -516,22 +709,29 @@ OAUTH_STATE_LIFETIME = 600
 
 
 def cleanup_expired_oauth_states():
+
     cutoff = (
-        datetime.now(timezone.utc).timestamp()
+        datetime.now(
+            timezone.utc
+        ).timestamp()
         - OAUTH_STATE_LIFETIME
     )
 
     conn = get_connection()
 
     try:
+
         conn.execute("""
             DELETE FROM oauth_states
             WHERE created_at < ?
-        """, (cutoff,))
+        """, (
+            cutoff,
+        ))
 
         conn.commit()
 
     finally:
+
         conn.close()
 
 
@@ -540,6 +740,7 @@ def create_oauth_state(
     guild_id,
     channel_id
 ):
+
     cleanup_expired_oauth_states()
 
     state = secrets.token_urlsafe(32)
@@ -551,6 +752,7 @@ def create_oauth_state(
     conn = get_connection()
 
     try:
+
         conn.execute("""
             INSERT INTO oauth_states (
                 state,
@@ -573,15 +775,18 @@ def create_oauth_state(
         return state
 
     finally:
+
         conn.close()
 
 
 def get_oauth_state(state):
+
     cleanup_expired_oauth_states()
 
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -593,7 +798,9 @@ def get_oauth_state(state):
                 created_at
             FROM oauth_states
             WHERE state = ?
-        """, (state,))
+        """, (
+            state,
+        ))
 
         row = cursor.fetchone()
 
@@ -609,6 +816,7 @@ def get_oauth_state(state):
         }
 
     finally:
+
         conn.close()
 
 
@@ -625,9 +833,12 @@ def consume_oauth_state(state):
     conn = get_connection()
 
     try:
+
         cursor = conn.cursor()
 
-        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            "BEGIN IMMEDIATE"
+        )
 
         cursor.execute("""
             SELECT
@@ -638,28 +849,38 @@ def consume_oauth_state(state):
                 created_at
             FROM oauth_states
             WHERE state = ?
-        """, (state,))
+        """, (
+            state,
+        ))
 
         row = cursor.fetchone()
 
         if not row:
+
             conn.rollback()
             return None
 
         cursor.execute("""
             DELETE FROM oauth_states
             WHERE state = ?
-        """, (state,))
+        """, (
+            state,
+        ))
 
         conn.commit()
 
-        created_at = float(row[4])
+        created_at = float(
+            row[4]
+        )
 
         if (
-            datetime.now(timezone.utc).timestamp()
+            datetime.now(
+                timezone.utc
+            ).timestamp()
             - created_at
             > OAUTH_STATE_LIFETIME
         ):
+
             return None
 
         return {
@@ -671,17 +892,22 @@ def consume_oauth_state(state):
         }
 
     except Exception:
+
         conn.rollback()
         raise
 
     finally:
+
         conn.close()
 
 
 def get_login_url(state):
+
     return (
         f"{PUBLIC_BASE_URL}/login?"
-        + urlencode({"state": state})
+        + urlencode({
+            "state": state
+        })
     )
 
 
@@ -690,6 +916,7 @@ def get_login_url(state):
 # ============================================================
 
 intents = discord.Intents.default()
+
 intents.guilds = True
 intents.members = True
 intents.message_content = True
@@ -701,14 +928,12 @@ bot = commands.Bot(
 )
 
 
-verification_creation_locks = {}
-
-
 # ============================================================
 # DISCORD EMBED
 # ============================================================
 
 def build_verification_embed():
+
     return discord.Embed(
         title="🎥 Creator Milestone Verification",
         description=(
@@ -725,7 +950,11 @@ def build_verification_embed():
 
 class ContinueToGoogleButton(Button):
 
-    def __init__(self, login_url):
+    def __init__(
+        self,
+        login_url
+    ):
+
         super().__init__(
             label="Continue to Google",
             style=discord.ButtonStyle.link,
@@ -735,17 +964,26 @@ class ContinueToGoogleButton(Button):
 
 class ContinueToGoogleView(View):
 
-    def __init__(self, login_url):
-        super().__init__(timeout=None)
+    def __init__(
+        self,
+        login_url
+    ):
+
+        super().__init__(
+            timeout=None
+        )
 
         self.add_item(
-            ContinueToGoogleButton(login_url)
+            ContinueToGoogleButton(
+                login_url
+            )
         )
 
 
 class ConnectYouTubeButton(Button):
 
     def __init__(self):
+
         super().__init__(
             label="Connect YouTube",
             style=discord.ButtonStyle.primary,
@@ -753,59 +991,105 @@ class ConnectYouTubeButton(Button):
             custom_id="connect_youtube_live"
         )
 
-    async def callback(self, interaction: discord.Interaction):
+    async def callback(
+        self,
+        interaction: discord.Interaction
+    ):
 
         user = interaction.user
         guild = interaction.guild
         channel = interaction.channel
 
         if guild is None or channel is None:
+
             await interaction.response.send_message(
                 "❌ This button can only be used inside the server.",
                 ephemeral=True
             )
+
             return
 
-        active_ticket = get_active_ticket(user.id)
+        active_ticket = get_active_ticket(
+            user.id
+        )
 
         if not active_ticket:
+
             await interaction.response.send_message(
                 "❌ You do not have an active verification ticket.",
                 ephemeral=True
             )
+
             return
 
-        active_guild_id = str(active_ticket[1])
-        active_channel_id = str(active_ticket[2])
+        active_guild_id = str(
+            active_ticket[1]
+        )
 
-        if active_guild_id != str(guild.id):
+        active_channel_id = str(
+            active_ticket[2]
+        )
+
+        # Never allow a pending reservation to be used
+        # as an actual OAuth ticket.
+        if active_channel_id.startswith(
+            "pending-"
+        ):
+
+            await interaction.response.send_message(
+                "⏳ Your verification ticket is still being created. "
+                "Please wait a moment and try again.",
+                ephemeral=True
+            )
+
+            return
+
+        if active_guild_id != str(
+            guild.id
+        ):
+
             await interaction.response.send_message(
                 "❌ This verification ticket belongs to another server.",
                 ephemeral=True
             )
+
             return
 
-        if active_channel_id != str(channel.id):
+        if active_channel_id != str(
+            channel.id
+        ):
+
             await interaction.response.send_message(
                 "❌ This is not your active verification ticket.",
                 ephemeral=True
             )
+
             return
 
-        # Create a brand-new state at the exact moment
-        # the user clicks Connect YouTube.
+        # ----------------------------------------------------
+        # Create a brand-new OAuth state every time the user
+        # presses Connect YouTube.
+        #
+        # This allows multiple Google/YouTube accounts to be
+        # connected from the same ticket.
+        # ----------------------------------------------------
+
         state = create_oauth_state(
             discord_user_id=user.id,
             guild_id=guild.id,
             channel_id=channel.id
         )
 
-        login_url = get_login_url(state)
+        login_url = get_login_url(
+            state
+        )
 
         await interaction.response.send_message(
             "🔐 Your secure YouTube connection link is ready.\n\n"
             "Click **Continue to Google** below.",
-            view=ContinueToGoogleView(login_url),
+            view=ContinueToGoogleView(
+                login_url
+            ),
             ephemeral=True
         )
 
@@ -813,7 +1097,10 @@ class ConnectYouTubeButton(Button):
 class ConnectYouTubeView(View):
 
     def __init__(self):
-        super().__init__(timeout=None)
+
+        super().__init__(
+            timeout=None
+        )
 
         self.add_item(
             ConnectYouTubeButton()
@@ -827,6 +1114,7 @@ class ConnectYouTubeView(View):
 class CloseTicketButton(Button):
 
     def __init__(self):
+
         super().__init__(
             label="Close Ticket",
             style=discord.ButtonStyle.danger,
@@ -834,38 +1122,62 @@ class CloseTicketButton(Button):
             custom_id="close_verification_ticket"
         )
 
-    async def callback(self, interaction: discord.Interaction):
+    async def callback(
+        self,
+        interaction: discord.Interaction
+    ):
 
         user = interaction.user
         channel = interaction.channel
 
         if channel is None:
+
+            await interaction.response.send_message(
+                "❌ This button can only be used inside a ticket.",
+                ephemeral=True
+            )
+
             return
 
-        active_ticket = get_active_ticket(user.id)
+        active_ticket = get_active_ticket(
+            user.id
+        )
 
         if not active_ticket:
+
             await interaction.response.send_message(
                 "❌ You do not have an active verification ticket.",
                 ephemeral=True
             )
+
             return
 
-        active_channel_id = str(active_ticket[2])
+        active_channel_id = str(
+            active_ticket[2]
+        )
 
-        if active_channel_id != str(channel.id):
+        if active_channel_id != str(
+            channel.id
+        ):
+
             await interaction.response.send_message(
                 "❌ This is not your active verification ticket.",
                 ephemeral=True
             )
+
             return
 
+        # ----------------------------------------------------
         # NEVER remove the bot owner from the ticket.
+        # ----------------------------------------------------
+
         if await bot.is_owner(user):
+
             await interaction.response.send_message(
                 "👑 The bot owner cannot be removed from this ticket.",
                 ephemeral=True
             )
+
             return
 
         await interaction.response.defer(
@@ -873,6 +1185,7 @@ class CloseTicketButton(Button):
         )
 
         try:
+
             await channel.set_permissions(
                 user,
                 view_channel=False,
@@ -880,7 +1193,9 @@ class CloseTicketButton(Button):
                 read_message_history=False
             )
 
-            delete_active_ticket(user.id)
+            delete_active_ticket(
+                user.id
+            )
 
             await interaction.followup.send(
                 "🔒 Your verification ticket has been closed.",
@@ -888,6 +1203,7 @@ class CloseTicketButton(Button):
             )
 
         except Exception as e:
+
             print(
                 "Error closing ticket:",
                 repr(e)
@@ -902,7 +1218,10 @@ class CloseTicketButton(Button):
 class CloseTicketView(View):
 
     def __init__(self):
-        super().__init__(timeout=None)
+
+        super().__init__(
+            timeout=None
+        )
 
         self.add_item(
             CloseTicketButton()
@@ -916,6 +1235,7 @@ class CloseTicketView(View):
 class VerifyButton(Button):
 
     def __init__(self):
+
         super().__init__(
             label="Verify Creator Milestones",
             style=discord.ButtonStyle.primary,
@@ -923,82 +1243,275 @@ class VerifyButton(Button):
             custom_id="verify_creator_milestones"
         )
 
-    async def callback(self, interaction: discord.Interaction):
+    async def callback(
+        self,
+        interaction: discord.Interaction
+    ):
 
         user = interaction.user
         guild = interaction.guild
 
         if guild is None:
+
             await interaction.response.send_message(
                 "❌ This button can only be used inside a server.",
                 ephemeral=True
             )
+
             return
 
         # ----------------------------------------------------
-        # Check if user already has an active ticket.
+        # Check existing ticket.
         # ----------------------------------------------------
 
-        existing_ticket = get_active_ticket(user.id)
+        existing_ticket = get_active_ticket(
+            user.id
+        )
 
         if existing_ticket:
-            existing_channel_id = existing_ticket[2]
 
-            existing_channel = guild.get_channel(
-                int(existing_channel_id)
+            existing_channel_id = str(
+                existing_ticket[2]
             )
 
-            if existing_channel:
-                await interaction.response.send_message(
-                    f"❌ You already have an active verification ticket: "
-                    f"{existing_channel.mention}",
-                    ephemeral=True
+            existing_created_at = existing_ticket[3]
+
+            # ------------------------------------------------
+            # IMPORTANT FIX:
+            #
+            # Never run int() on a pending-* reservation.
+            # ------------------------------------------------
+
+            if existing_channel_id.startswith(
+                "pending-"
+            ):
+
+                # A recent pending reservation means another
+                # request is already creating this user's ticket.
+                if not is_pending_ticket_stale(
+                    existing_created_at
+                ):
+
+                    await interaction.response.send_message(
+                        "⏳ Your verification ticket is currently "
+                        "being created. Please wait a moment.",
+                        ephemeral=True
+                    )
+
+                    return
+
+                # ------------------------------------------------
+                # Old pending reservation.
+                #
+                # The previous creation attempt likely failed
+                # or the process restarted.
+                # ------------------------------------------------
+
+                print(
+                    "Removing stale pending ticket reservation "
+                    f"for user {user.id}: "
+                    f"{existing_channel_id}"
                 )
-                return
 
-            # Stale database entry.
-            delete_active_ticket(user.id)
+                delete_active_ticket(
+                    user.id
+                )
+
+            else:
+
+                # ------------------------------------------------
+                # Only actual Discord channel IDs reach int().
+                # ------------------------------------------------
+
+                try:
+
+                    existing_channel_id_int = int(
+                        existing_channel_id
+                    )
+
+                except (
+                    TypeError,
+                    ValueError
+                ):
+
+                    print(
+                        "Invalid active ticket channel ID:",
+                        repr(existing_channel_id)
+                    )
+
+                    delete_active_ticket(
+                        user.id
+                    )
+
+                else:
+
+                    existing_channel = guild.get_channel(
+                        existing_channel_id_int
+                    )
+
+                    if existing_channel:
+
+                        await interaction.response.send_message(
+                            f"❌ You already have an active "
+                            f"verification ticket: "
+                            f"{existing_channel.mention}",
+                            ephemeral=True
+                        )
+
+                        return
+
+                    # ------------------------------------------------
+                    # Database points to a Discord channel that
+                    # no longer exists.
+                    # ------------------------------------------------
+
+                    print(
+                        "Removing stale ticket database entry "
+                        f"for user {user.id}: "
+                        f"channel {existing_channel_id}"
+                    )
+
+                    delete_active_ticket(
+                        user.id
+                    )
 
         # ----------------------------------------------------
-        # Reserve ticket slot BEFORE creating channel.
+        # Atomically reserve ticket slot.
         # ----------------------------------------------------
 
-        reserved, reservation_value = reserve_ticket_slot(
-            user.id,
-            guild.id
-        )
+        try:
+
+            reserved, reservation_value = (
+                reserve_ticket_slot(
+                    user.id,
+                    guild.id
+                )
+            )
+
+        except Exception as e:
+
+            print(
+                "Ticket reservation failed:",
+                repr(e)
+            )
+
+            await interaction.response.send_message(
+                "❌ I couldn't start your verification ticket. "
+                "Please try again.",
+                ephemeral=True
+            )
+
+            return
 
         if not reserved:
 
+            reservation_value = str(
+                reservation_value
+            )
+
+            # ------------------------------------------------
+            # Another request is currently creating the ticket.
+            # ------------------------------------------------
+
+            if reservation_value.startswith(
+                "pending-"
+            ):
+
+                await interaction.response.send_message(
+                    "⏳ Your verification ticket is currently "
+                    "being created. Please wait a moment.",
+                    ephemeral=True
+                )
+
+                return
+
+            # ------------------------------------------------
+            # Existing reservation should be a real channel ID.
+            # ------------------------------------------------
+
+            try:
+
+                reservation_channel_id = int(
+                    reservation_value
+                )
+
+            except (
+                TypeError,
+                ValueError
+            ):
+
+                print(
+                    "Invalid reservation channel ID:",
+                    repr(reservation_value)
+                )
+
+                delete_active_ticket(
+                    user.id
+                )
+
+                await interaction.response.send_message(
+                    "❌ Your previous ticket reservation was invalid. "
+                    "Please press the verification button again.",
+                    ephemeral=True
+                )
+
+                return
+
             existing_channel = guild.get_channel(
-                int(reservation_value)
-            ) if str(reservation_value).isdigit() else None
+                reservation_channel_id
+            )
 
             if existing_channel:
+
                 await interaction.response.send_message(
-                    f"❌ You already have an active verification ticket: "
+                    f"❌ You already have an active "
+                    f"verification ticket: "
                     f"{existing_channel.mention}",
                     ephemeral=True
                 )
+
             else:
+
+                delete_active_ticket(
+                    user.id
+                )
+
                 await interaction.response.send_message(
-                    "❌ You already have a verification ticket being created.",
+                    "❌ Your previous verification ticket no longer "
+                    "exists. Please press the verification button again.",
                     ephemeral=True
                 )
 
             return
+
+        # ----------------------------------------------------
+        # ACKNOWLEDGE THE INTERACTION BEFORE doing Discord API
+        # work such as creating the channel.
+        #
+        # This prevents:
+        # "The application didn't respond in time"
+        # ----------------------------------------------------
 
         await interaction.response.defer(
             ephemeral=True
         )
 
+        # ----------------------------------------------------
+        # Find ticket category.
+        # ----------------------------------------------------
+
         category = guild.get_channel(
             TICKET_CATEGORY_ID
         )
 
-        if not isinstance(category, discord.CategoryChannel):
+        if not isinstance(
+            category,
+            discord.CategoryChannel
+        ):
 
-            delete_active_ticket(user.id)
+            delete_active_ticket(
+                user.id
+            )
 
             await interaction.followup.send(
                 "❌ The verification ticket category could not be found.",
@@ -1008,7 +1521,7 @@ class VerifyButton(Button):
             return
 
         # ----------------------------------------------------
-        # Channel name
+        # Channel name.
         # ----------------------------------------------------
 
         safe_name = re.sub(
@@ -1020,16 +1533,19 @@ class VerifyButton(Button):
         if not safe_name:
             safe_name = "user"
 
-        channel_name = f"verify-{safe_name}"
+        channel_name = (
+            f"verify-{safe_name}"
+        )
 
         # ----------------------------------------------------
-        # Permissions
+        # Permissions.
         # ----------------------------------------------------
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(
                 view_channel=False
             ),
+
             user: discord.PermissionOverwrite(
                 view_channel=True,
                 send_messages=True,
@@ -1038,16 +1554,19 @@ class VerifyButton(Button):
         }
 
         if guild.me:
-            overwrites[guild.me] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                manage_channels=True,
-                manage_permissions=True
+
+            overwrites[guild.me] = (
+                discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    manage_channels=True,
+                    manage_permissions=True
+                )
             )
 
         # ----------------------------------------------------
-        # Create channel
+        # Create channel.
         # ----------------------------------------------------
 
         try:
@@ -1056,7 +1575,9 @@ class VerifyButton(Button):
                 channel_name,
                 category=category,
                 overwrites=overwrites,
-                reason="Creator milestone verification ticket"
+                reason=(
+                    "Creator milestone verification ticket"
+                )
             )
 
         except Exception as e:
@@ -1066,7 +1587,9 @@ class VerifyButton(Button):
                 repr(e)
             )
 
-            delete_active_ticket(user.id)
+            delete_active_ticket(
+                user.id
+            )
 
             await interaction.followup.send(
                 "❌ I couldn't create your verification ticket.",
@@ -1076,7 +1599,7 @@ class VerifyButton(Button):
             return
 
         # ----------------------------------------------------
-        # Save actual channel ID
+        # Save the REAL Discord channel ID.
         # ----------------------------------------------------
 
         set_active_ticket_channel(
@@ -1085,8 +1608,10 @@ class VerifyButton(Button):
         )
 
         # ----------------------------------------------------
-        # Send controls
+        # Send verification controls.
         # ----------------------------------------------------
+
+        controls_sent = True
 
         try:
 
@@ -1104,10 +1629,35 @@ class VerifyButton(Button):
 
         except Exception as e:
 
+            controls_sent = False
+
             print(
                 "Failed sending ticket controls:",
                 repr(e)
             )
+
+        # ----------------------------------------------------
+        # If controls could not be sent, remove the database
+        # reservation so the user isn't permanently locked.
+        # ----------------------------------------------------
+
+        if not controls_sent:
+
+            delete_active_ticket(
+                user.id
+            )
+
+            await interaction.followup.send(
+                "❌ The ticket was created, but I couldn't "
+                "finish setting it up. Please try again.",
+                ephemeral=True
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # Final response.
+        # ----------------------------------------------------
 
         await interaction.followup.send(
             f"✅ Your verification ticket is ready: "
@@ -1119,7 +1669,10 @@ class VerifyButton(Button):
 class VerifyView(View):
 
     def __init__(self):
-        super().__init__(timeout=None)
+
+        super().__init__(
+            timeout=None
+        )
 
         self.add_item(
             VerifyButton()
@@ -1130,7 +1683,10 @@ class VerifyView(View):
 # SEND VERIFICATION CONTROLS
 # ============================================================
 
-async def send_verification_controls(channel, user):
+async def send_verification_controls(
+    channel,
+    user
+):
 
     await channel.send(
         content=f"{user.mention}",
@@ -1173,8 +1729,8 @@ async def on_ready():
 @bot.event
 async def setup_hook():
 
-    # Register persistent buttons so buttons from
-    # messages created before a restart continue working.
+    # Register persistent buttons so buttons from messages
+    # created before a restart continue working.
 
     bot.add_view(
         VerifyView()
@@ -1206,12 +1762,16 @@ async def roles_command(ctx):
 
 
 @roles_command.error
-async def roles_command_error(ctx, error):
+async def roles_command_error(
+    ctx,
+    error
+):
 
     if isinstance(
         error,
         commands.NotOwner
     ):
+
         await ctx.send(
             "❌ Only the bot owner can use this command."
         )
@@ -1262,7 +1822,9 @@ def get_google_user(access_token):
     response = requests.get(
         GOOGLE_USERINFO_URL,
         headers={
-            "Authorization": f"Bearer {access_token}"
+            "Authorization": (
+                f"Bearer {access_token}"
+            )
         },
         timeout=30
     )
@@ -1272,7 +1834,9 @@ def get_google_user(access_token):
     return response.json()
 
 
-def get_all_youtube_channels(access_token):
+def get_all_youtube_channels(
+    access_token
+):
 
     channels = []
 
@@ -1287,12 +1851,17 @@ def get_all_youtube_channels(access_token):
         }
 
         if page_token:
-            params["pageToken"] = page_token
+
+            params["pageToken"] = (
+                page_token
+            )
 
         response = requests.get(
             f"{YOUTUBE_API_URL}/channels",
             headers={
-                "Authorization": f"Bearer {access_token}"
+                "Authorization": (
+                    f"Bearer {access_token}"
+                )
             },
             params=params,
             timeout=30
@@ -1302,7 +1871,10 @@ def get_all_youtube_channels(access_token):
 
         data = response.json()
 
-        for item in data.get("items", []):
+        for item in data.get(
+            "items",
+            []
+        ):
 
             statistics = item.get(
                 "statistics",
@@ -1311,13 +1883,16 @@ def get_all_youtube_channels(access_token):
 
             channels.append({
                 "id": item["id"],
+
                 "title": item["snippet"]["title"],
+
                 "subscriber_count": int(
                     statistics.get(
                         "subscriberCount",
                         0
                     )
                 ),
+
                 "view_count": int(
                     statistics.get(
                         "viewCount",
@@ -1345,33 +1920,71 @@ async def assign_roles(
     guild_id
 ):
 
-    guild = bot.get_guild(
-        int(guild_id)
-    )
+    try:
+
+        guild = bot.get_guild(
+            int(guild_id)
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+
+        print(
+            f"Invalid guild ID: {guild_id}"
+        )
+
+        return
 
     if not guild:
+
         print(
             f"Guild {guild_id} not found."
         )
+
         return
 
-    member = guild.get_member(
-        int(discord_user_id)
-    )
+    try:
+
+        member = guild.get_member(
+            int(discord_user_id)
+        )
+
+    except (
+        TypeError,
+        ValueError
+    ):
+
+        print(
+            f"Invalid Discord user ID: "
+            f"{discord_user_id}"
+        )
+
+        return
 
     if not member:
+
         try:
+
             member = await guild.fetch_member(
                 int(discord_user_id)
             )
-        except Exception:
+
+        except Exception as e:
+
             print(
-                f"Could not find member {discord_user_id}."
+                f"Could not find member "
+                f"{discord_user_id}:",
+                repr(e)
             )
+
             return
 
-    subscribers, views = get_aggregate_totals(
-        discord_user_id
+    subscribers, views = (
+        get_aggregate_totals(
+            discord_user_id
+        )
     )
 
     thresholds = [
@@ -1379,30 +1992,37 @@ async def assign_roles(
             "50K_SUBS",
             subscribers >= 50_000
         ),
+
         (
             "100K_SUBS",
             subscribers >= 100_000
         ),
+
         (
             "1M_SUBS",
             subscribers >= 1_000_000
         ),
+
         (
             "1M_VIEWS",
             views >= 1_000_000
         ),
+
         (
             "10M_VIEWS",
             views >= 10_000_000
         ),
+
         (
             "50M_VIEWS",
             views >= 50_000_000
         ),
+
         (
             "100M_VIEWS",
             views >= 100_000_000
         ),
+
         (
             "1B_VIEWS",
             views >= 1_000_000_000
@@ -1414,30 +2034,39 @@ async def assign_roles(
         if not qualifies:
             continue
 
-        role_id = ROLE_MAP[role_name]
+        role_id = ROLE_MAP[
+            role_name
+        ]
 
         role = guild.get_role(
             role_id
         )
 
         if not role:
+
             print(
                 f"Role {role_id} not found."
             )
+
             continue
 
         if role not in member.roles:
 
             try:
+
                 await member.add_roles(
                     role,
-                    reason="YouTube creator milestone verification"
+                    reason=(
+                        "YouTube creator "
+                        "milestone verification"
+                    )
                 )
 
             except Exception as e:
 
                 print(
-                    f"Could not add {role_name}:",
+                    f"Could not add "
+                    f"{role_name}:",
                     repr(e)
                 )
 
@@ -1454,13 +2083,16 @@ app = FastAPI()
 # ============================================================
 
 @app.get("/login")
-async def login(request: Request):
+async def login(
+    request: Request
+):
 
     state = request.query_params.get(
         "state"
     )
 
     if not state:
+
         return HTMLResponse(
             """
             <html>
@@ -1483,6 +2115,7 @@ async def login(request: Request):
     )
 
     if not state_data:
+
         return HTMLResponse(
             """
             <html>
@@ -1505,15 +2138,21 @@ async def login(request: Request):
 
     params = {
         "client_id": GOOGLE_CLIENT_ID,
+
         "redirect_uri": REDIRECT_URI,
+
         "response_type": "code",
+
         "scope": (
             "openid "
             "email "
             "https://www.googleapis.com/auth/youtube.readonly"
         ),
+
         "access_type": "offline",
+
         "prompt": "select_account",
+
         "state": state
     }
 
@@ -1551,6 +2190,7 @@ async def callback(
     )
 
     if error:
+
         return HTMLResponse(
             f"""
             <html>
@@ -1572,6 +2212,7 @@ async def callback(
         )
 
     if not state or not code:
+
         return HTMLResponse(
             """
             <html>
@@ -1590,7 +2231,7 @@ async def callback(
         )
 
     # --------------------------------------------------------
-    # Atomically consume the state.
+    # Atomically consume OAuth state.
     # --------------------------------------------------------
 
     state_data = consume_oauth_state(
@@ -1598,6 +2239,7 @@ async def callback(
     )
 
     if not state_data:
+
         return HTMLResponse(
             """
             <html>
@@ -1607,7 +2249,10 @@ async def callback(
                 font-family:Arial;
                 padding:40px;
             ">
-                <h2>Verification link expired or was already used</h2>
+                <h2>
+                    Verification link expired or was already used
+                </h2>
+
                 <p>
                     Return to Discord and press
                     <b>Connect YouTube</b> again.
@@ -1639,6 +2284,7 @@ async def callback(
     )
 
     if not active_ticket:
+
         return HTMLResponse(
             """
             <html>
@@ -1659,10 +2305,13 @@ async def callback(
         )
 
     if (
-        str(active_ticket[1]) != str(guild_id)
+        str(active_ticket[1])
+        != str(guild_id)
         or
-        str(active_ticket[2]) != str(ticket_channel_id)
+        str(active_ticket[2])
+        != str(ticket_channel_id)
     ):
+
         return HTMLResponse(
             """
             <html>
@@ -1788,11 +2437,13 @@ async def callback(
         )
 
     # --------------------------------------------------------
-    # Prevent duplicate Gmail / Google account verification.
+    # Prevent duplicate Google account verification.
     # --------------------------------------------------------
 
-    existing_google_account = get_google_account_by_sub(
-        google_sub
+    existing_google_account = (
+        get_google_account_by_sub(
+            google_sub
+        )
     )
 
     if existing_google_account:
@@ -1805,12 +2456,14 @@ async def callback(
             existing_discord_user_id
             == str(discord_user_id)
         ):
+
             message = (
                 "This Gmail is already verified "
                 "for your Discord account."
             )
 
         else:
+
             message = (
                 "This Gmail is already verified "
                 "by another Discord account."
@@ -1903,11 +2556,14 @@ async def callback(
 
     for channel in channels:
 
-        existing_channel = get_verified_channel(
-            channel["id"]
+        existing_channel = (
+            get_verified_channel(
+                channel["id"]
+            )
         )
 
         if existing_channel:
+
             duplicate_channels.append(
                 channel["title"]
             )
@@ -1928,12 +2584,15 @@ async def callback(
                 padding:40px;
             ">
                 <h2>YouTube channel already verified</h2>
+
                 <p>
                     The following channel(s) are already verified:
                 </p>
+
                 <p>
                     {html.escape(channel_names)}
                 </p>
+
                 <p>
                     Return to Discord to continue.
                 </p>
@@ -1959,7 +2618,8 @@ async def callback(
     except sqlite3.IntegrityError as e:
 
         print(
-            "Duplicate verification prevented by database:",
+            "Duplicate verification prevented "
+            "by database:",
             repr(e)
         )
 
@@ -1972,7 +2632,10 @@ async def callback(
                 font-family:Arial;
                 padding:40px;
             ">
-                <h2>This account or channel is already verified</h2>
+                <h2>
+                    This account or channel is already verified
+                </h2>
+
                 <p>
                     Return to Discord to continue.
                 </p>
@@ -2010,8 +2673,10 @@ async def callback(
     # Calculate totals across ALL verified channels.
     # --------------------------------------------------------
 
-    subscribers, views = get_aggregate_totals(
-        discord_user_id
+    subscribers, views = (
+        get_aggregate_totals(
+            discord_user_id
+        )
     )
 
     # --------------------------------------------------------
@@ -2020,19 +2685,30 @@ async def callback(
 
     try:
 
-        awaitable = assign_roles(
+        role_task = assign_roles(
             discord_user_id,
             guild_id
         )
 
-        # Because FastAPI runs separately from Discord's
-        # event loop, schedule the coroutine on the bot loop.
-        if bot.loop and bot.loop.is_running():
+        if (
+            bot.loop
+            and bot.loop.is_running()
+        ):
 
             asyncio.run_coroutine_threadsafe(
-                awaitable,
+                role_task,
                 bot.loop
             )
+
+        else:
+
+            print(
+                "Bot loop is not running; "
+                "roles could not be scheduled."
+            )
+
+            # Avoid leaving an unawaited coroutine.
+            role_task.close()
 
     except Exception as e:
 
@@ -2043,55 +2719,92 @@ async def callback(
 
     # --------------------------------------------------------
     # Send fresh Connect YouTube controls.
+    #
+    # This allows the member to connect another Google
+    # account from the same ticket.
     # --------------------------------------------------------
 
-    channel = bot.get_channel(
-        int(ticket_channel_id)
-    )
+    try:
 
-    if channel:
-
-        discord_user = guild_member = None
-
-        guild = bot.get_guild(
-            int(guild_id)
+        ticket_channel_id_int = int(
+            ticket_channel_id
         )
 
-        if guild:
+    except (
+        TypeError,
+        ValueError
+    ):
 
-            guild_member = guild.get_member(
-                int(discord_user_id)
+        print(
+            "Invalid OAuth ticket channel ID:",
+            repr(ticket_channel_id)
+        )
+
+        ticket_channel_id_int = None
+
+    if ticket_channel_id_int:
+
+        channel = bot.get_channel(
+            ticket_channel_id_int
+        )
+
+        if channel:
+
+            guild = bot.get_guild(
+                int(guild_id)
             )
 
-        if guild_member:
+            if guild:
 
-            try:
-
-                awaitable = send_verification_controls(
-                    channel,
-                    guild_member
+                guild_member = guild.get_member(
+                    int(discord_user_id)
                 )
 
-                if bot.loop and bot.loop.is_running():
+                if guild_member:
 
-                    asyncio.run_coroutine_threadsafe(
-                        awaitable,
-                        bot.loop
-                    )
+                    try:
 
-            except Exception as e:
+                        controls_task = (
+                            send_verification_controls(
+                                channel,
+                                guild_member
+                            )
+                        )
 
-                print(
-                    "Could not schedule new controls:",
-                    repr(e)
-                )
+                        if (
+                            bot.loop
+                            and bot.loop.is_running()
+                        ):
+
+                            asyncio.run_coroutine_threadsafe(
+                                controls_task,
+                                bot.loop
+                            )
+
+                        else:
+
+                            print(
+                                "Bot loop is not running; "
+                                "new controls could not be scheduled."
+                            )
+
+                            controls_task.close()
+
+                    except Exception as e:
+
+                        print(
+                            "Could not schedule "
+                            "new controls:",
+                            repr(e)
+                        )
 
     # --------------------------------------------------------
     # Success page.
     # --------------------------------------------------------
 
     safe_email = html.escape(
-        google_email or "Google account"
+        google_email
+        or "Google account"
     )
 
     channel_count = len(
@@ -2101,6 +2814,7 @@ async def callback(
     return HTMLResponse(
         f"""
         <html>
+
         <head>
             <title>Verification Complete</title>
         </head>
@@ -2177,6 +2891,7 @@ async def home():
     return HTMLResponse(
         f"""
         <html>
+
         <head>
             <title>PRINT Creator Verification</title>
         </head>
@@ -2198,11 +2913,14 @@ async def home():
                 padding:40px;
             ">
 
-                <h1>PRINT Creator Verification</h1>
+                <h1>
+                    PRINT Creator Verification
+                </h1>
 
                 <p>
                     This service handles YouTube creator
-                    milestone verification for the PRINT Discord server.
+                    milestone verification for the PRINT
+                    Discord server.
                 </p>
 
                 <p style="opacity:.7;">
@@ -2228,6 +2946,7 @@ async def privacy():
     return HTMLResponse(
         """
         <html>
+
         <head>
             <title>Privacy Policy</title>
         </head>
@@ -2271,7 +2990,10 @@ async def privacy():
 def run_web_server():
 
     port = int(
-        os.getenv("PORT", "10000")
+        os.getenv(
+            "PORT",
+            "10000"
+        )
     )
 
     uvicorn.run(
