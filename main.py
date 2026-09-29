@@ -715,7 +715,6 @@ class ConnectYouTubeButton(Button):
 
     async def callback(self, interaction: discord.Interaction):
 
-        # ACKNOWLEDGE IMMEDIATELY.
         await interaction.response.defer(
             ephemeral=True
         )
@@ -820,7 +819,6 @@ class CloseTicketButton(Button):
 
     async def callback(self, interaction: discord.Interaction):
 
-        # ACKNOWLEDGE IMMEDIATELY.
         await interaction.response.defer(
             ephemeral=True
         )
@@ -917,11 +915,6 @@ class VerifyButton(Button):
 
     async def callback(self, interaction: discord.Interaction):
 
-        # ----------------------------------------------------
-        # CRITICAL:
-        # Acknowledge the Discord interaction FIRST.
-        # ----------------------------------------------------
-
         await interaction.response.defer(
             ephemeral=True
         )
@@ -975,7 +968,6 @@ class VerifyButton(Button):
                     )
                     return
 
-                # Channel no longer exists.
                 await asyncio.to_thread(
                     delete_active_ticket,
                     user.id
@@ -1246,6 +1238,211 @@ async def roles_command(ctx):
 
 @roles_command.error
 async def roles_command_error(ctx, error):
+
+    if isinstance(error, commands.NotOwner):
+
+        await ctx.send(
+            "❌ Only the bot owner can use this command."
+        )
+
+
+# ============================================================
+# TEMPORARY TEST RESET
+# ============================================================
+
+def reset_user_verification(discord_user_id):
+
+    conn = get_connection()
+
+    try:
+
+        cursor = conn.cursor()
+
+        # ----------------------------------------------------
+        # Remove verified YouTube channels
+        # ----------------------------------------------------
+
+        cursor.execute("""
+            DELETE FROM verified_channels
+            WHERE discord_user_id = ?
+        """, (
+            str(discord_user_id),
+        ))
+
+        # ----------------------------------------------------
+        # Remove verified Google accounts
+        # ----------------------------------------------------
+
+        cursor.execute("""
+            DELETE FROM google_accounts
+            WHERE discord_user_id = ?
+        """, (
+            str(discord_user_id),
+        ))
+
+        # ----------------------------------------------------
+        # Remove legacy verification records
+        # ----------------------------------------------------
+
+        cursor.execute("""
+            DELETE FROM verifications
+            WHERE discord_user_id = ?
+        """, (
+            str(discord_user_id),
+        ))
+
+        # ----------------------------------------------------
+        # Remove active ticket
+        # ----------------------------------------------------
+
+        cursor.execute("""
+            DELETE FROM active_tickets
+            WHERE discord_user_id = ?
+        """, (
+            str(discord_user_id),
+        ))
+
+        # ----------------------------------------------------
+        # Remove OAuth states
+        # ----------------------------------------------------
+
+        cursor.execute("""
+            DELETE FROM oauth_states
+            WHERE discord_user_id = ?
+        """, (
+            str(discord_user_id),
+        ))
+
+        conn.commit()
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+
+        conn.close()
+
+
+@bot.command(name="resetverification")
+@commands.is_owner()
+async def resetverification_command(ctx):
+
+    user = ctx.author
+
+    try:
+
+        # ----------------------------------------------------
+        # Find current active ticket BEFORE deleting DB data
+        # ----------------------------------------------------
+
+        active_ticket = await asyncio.to_thread(
+            get_active_ticket,
+            user.id
+        )
+
+        # ----------------------------------------------------
+        # Delete current verification ticket
+        # ----------------------------------------------------
+
+        if active_ticket:
+
+            channel_id = str(
+                active_ticket[2]
+            )
+
+            if channel_id.isdigit():
+
+                ticket_channel = ctx.guild.get_channel(
+                    int(channel_id)
+                )
+
+                if ticket_channel:
+
+                    try:
+
+                        await ticket_channel.delete(
+                            reason="Temporary verification test reset"
+                        )
+
+                    except Exception as e:
+
+                        print(
+                            "Could not delete old test ticket:",
+                            repr(e)
+                        )
+
+        # ----------------------------------------------------
+        # Reset all verification database data
+        # ----------------------------------------------------
+
+        await asyncio.to_thread(
+            reset_user_verification,
+            user.id
+        )
+
+        # ----------------------------------------------------
+        # Remove milestone roles
+        # ----------------------------------------------------
+
+        removed_roles = 0
+
+        for role_id in ROLE_MAP.values():
+
+            role = ctx.guild.get_role(
+                role_id
+            )
+
+            if role and role in user.roles:
+
+                try:
+
+                    await user.remove_roles(
+                        role,
+                        reason="Temporary verification test reset"
+                    )
+
+                    removed_roles += 1
+
+                except Exception as e:
+
+                    print(
+                        f"Could not remove role {role_id}:",
+                        repr(e)
+                    )
+
+        # ----------------------------------------------------
+        # Confirmation
+        # ----------------------------------------------------
+
+        await ctx.send(
+            "🧹 **Verification test reset complete.**\n\n"
+            "Your Google account verification data, "
+            "YouTube channel verification data, "
+            "legacy verification data, OAuth states, "
+            "active ticket, and milestone roles have all "
+            "been reset.\n\n"
+            f"Removed milestone roles: **{removed_roles}**\n\n"
+            "You can now run `$roles` and perform a completely "
+            "fresh verification test."
+        )
+
+    except Exception as e:
+
+        print(
+            "Reset verification error:",
+            repr(e)
+        )
+
+        await ctx.send(
+            "❌ The verification test reset failed. "
+            "Check the Railway logs."
+        )
+
+
+@resetverification_command.error
+async def resetverification_command_error(ctx, error):
 
     if isinstance(error, commands.NotOwner):
 
