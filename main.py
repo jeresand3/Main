@@ -1008,17 +1008,10 @@ class PrintBot(commands.Bot):
 
     async def setup_hook(self):
 
-        self.add_view(
-            VerifyView()
-        )
+        # The public verification message uses a direct link button,
+        # so no ticket or legacy verification view is registered.
+        pass
 
-        self.add_view(
-            ConnectYouTubeView()
-        )
-
-        self.add_view(
-            CloseTicketView()
-        )
 
 
 bot = PrintBot(
@@ -1309,6 +1302,35 @@ class CloseTicketView(View):
 
         self.add_item(
             CloseTicketButton()
+        )
+
+
+# ============================================================
+# DISCORD LINKED ROLE BUTTON
+# ============================================================
+
+class LinkedRoleLoginButton(Button):
+
+    def __init__(self):
+
+        super().__init__(
+            label="Verify Creator Milestones",
+            style=discord.ButtonStyle.link,
+            emoji="🎥",
+            url=f"{PUBLIC_BASE_URL}/discord-login"
+        )
+
+
+class LinkedRoleView(View):
+
+    def __init__(self):
+
+        super().__init__(
+            timeout=None
+        )
+
+        self.add_item(
+            LinkedRoleLoginButton()
         )
 
 
@@ -1652,6 +1674,11 @@ async def on_ready():
         f"{DISCORD_REDIRECT_URI}"
     )
 
+    print(
+        "Linked Role verification URL: "
+        f"{PUBLIC_BASE_URL}/discord-login"
+    )
+
 
 # ============================================================
 # $roles
@@ -1661,9 +1688,21 @@ async def on_ready():
 @commands.is_owner()
 async def roles_command(ctx):
 
+    embed = discord.Embed(
+        title="🎥 Creator Milestone Linked Role",
+        description=(
+            "Connect your Discord account to your Google/YouTube "
+            "account to verify your creator milestones.\n\n"
+            "PRINT securely checks your YouTube statistics and "
+            "sends only the milestone values to Discord.\n\n"
+            "No verification ticket is required."
+        ),
+        color=discord.Color.red()
+    )
+
     await ctx.send(
-        embed=build_verification_embed(),
-        view=VerifyView()
+        embed=embed,
+        view=LinkedRoleView()
     )
 
 
@@ -1839,7 +1878,7 @@ async def resetverification_command(ctx):
             "been reset.\n\n"
             f"Removed milestone roles: **{removed_roles}**\n\n"
             "You can now run `$roles` and perform a completely "
-            "fresh verification test."
+            "fresh Linked Role verification test."
         )
 
     except Exception as e:
